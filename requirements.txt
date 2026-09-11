@@ -1,0 +1,11 @@
+# ================= LLM 全链路工作流: 训练 → 推理 → 量化 → 部署 =================
+# Python 工具链依赖 (建议 Python 3.10+)
+# 安装: pip install -r requirements.txt
+
+torch>=2.2
+transformers>=4.44
+tokenizers>=0.19
+datasets>=2.20
+numpy
+pyyaml
+tqdm

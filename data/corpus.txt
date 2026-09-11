@@ -1,0 +1,47 @@
+人工智能是计算机科学的一个分支，它致力于研究如何让机器模拟人类的智能行为。
+机器学习是实现人工智能的核心方法，它通过数据训练模型，使计算机能够从经验中学习。
+深度学习是机器学习的一个子领域，它使用多层神经网络来学习数据的复杂表示。
+神经网络由许多相互连接的神经元组成，每个神经元对输入进行加权求和并通过激活函数输出。
+Transformer 架构是现代大语言模型的基础，它完全基于注意力机制，摒弃了循环结构。
+自注意力机制允许模型在处理每个词时关注输入序列中的所有其他词，从而捕捉长距离依赖。
+大语言模型通过在海量文本上进行预训练，学会了语言的统计规律和世界知识。
+训练语言模型的目标函数很简单：根据前文预测下一个词，这就是所谓的语言建模。
+词元化是将原始文本切分为模型可处理的最小单位的过程，常用的方法包括 BPE 和 WordPiece。
+BPE 即字节对编码，它从字符开始，迭代地将最频繁出现的字节对合并为新的词元。
+量化是模型压缩的重要技术，它将模型权重从高精度浮点数转换为低比特整数表示。
+FP16 使用两个字节存储一个权重，而 INT4 只需要半个字节，可以大幅减少内存占用。
+GGUF 是 llama.cpp 项目定义的模型文件格式，它将模型权重、分词器和元数据打包在单个文件中。
+llama.cpp 是一个用 C 和 C++ 编写的高性能推理引擎，支持在 CPU 和 GPU 上运行量化模型。
+Q4_K_M 是 llama.cpp 中常用的量化方案，它在模型大小和生成质量之间取得了良好的平衡。
+推理是指使用训练好的模型进行预测的过程，对语言模型来说就是逐个生成词元。
+KV 缓存是推理加速的关键技术，它缓存已处理词元的键值对，避免重复计算。
+温度参数控制生成文本的随机性，较低的温度使输出更加确定，较高的温度使输出更加多样。
+模型部署是将训练好的模型投入生产环境的过程，涉及服务化、监控和性能优化。
+Docker 容器技术可以将模型服务和它的依赖打包在一起，保证在任何环境中一致运行。
+HTTP API 是模型服务最常见的接口形式，客户端通过发送请求获得模型生成的结果。
+流式输出可以让用户更快看到模型的响应，服务端每生成一个词元就立即推送给客户端。
+Go 语言以其出色的并发性能和简洁的语法，成为构建高性能网络服务的流行选择。
+微调是在预训练模型的基础上，使用领域数据继续训练，使模型适应特定任务的方法。
+LoRA 是一种参数高效的微调方法，它只训练低秩的适配矩阵，大幅减少训练成本。
+评估模型性能需要考虑多个维度，包括生成质量、推理速度、内存占用和吞吐量。
+数据质量决定模型上限，在训练之前需要对语料进行清洗、去重和格式规范化。
+学习率是训练中最重要的超参数之一，过大会导致训练不稳定，过小会使收敛缓慢。
+梯度下降通过计算损失函数对参数的梯度，沿着负梯度方向更新模型参数。
+反向传播算法高效地计算神经网络中所有参数的梯度，是深度学习训练的基石。
+The transformer model reads the entire input sequence at once and uses attention to weigh the importance of each token.
+Language models are trained to minimize the cross-entropy loss between predicted and actual next tokens.
+Quantization maps floating point weights to a small set of discrete levels, reducing model size dramatically.
+A well quantized four bit model can be less than one quarter the size of its float sixteen counterpart.
+Inference servers expose REST APIs so that applications can request text generation over the network.
+Streaming responses improve perceived latency because tokens are delivered as soon as they are generated.
+Go handles thousands of concurrent connections with goroutines, making it ideal for API gateways.
+Docker images bundle the runtime, the model weights and all dependencies into one deployable unit.
+Model training starts with a clean dataset, a well chosen learning rate and a clear objective.
+The attention mechanism computes queries, keys and values to let every token attend to every other token.
+训练完成后需要将模型导出为推理引擎支持的格式，这一步称为模型转换或格式导出。
+端到端的工作流包括数据准备、模型训练、格式导出、量化压缩、服务部署和线上监控六个阶段。
+每个阶段都可以自动化，通过脚本和容器编排，实现从代码到可运行服务的一键交付。
+监控线上服务需要关注请求延迟、吞吐量、错误率和资源占用等关键指标。
+When the model is small enough, it can run entirely on a laptop CPU without any dedicated GPU.
+Tiny models trained from scratch are perfect for learning the full lifecycle of language models.
+从零训练一个小模型是理解大模型工作原理的最好方式，因为整个流程完全由自己掌控。

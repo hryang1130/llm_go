@@ -1,0 +1,39 @@
+services:
+  # llama.cpp 推理服务 (加载量化后的 GGUF)
+  # 首次运行前请把量化好的 models/tinyllm-q4_k_m.gguf 放到项目 models/ 目录
+  llama-server:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./models:/models:ro
+    command: >
+      -m /models/tinyllm-q4_k_m.gguf
+      --host 0.0.0.0 --port 8081
+      --ctx-size 512
+
+  # Go 推理网关
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    ports:
+      - "8080:8080"
+    environment:
+      LLAMA_SERVER_URL: http://llama-server:8081
+      GATEWAY_PORT: "8080"
+    depends_on:
+      - llama-server
+
+  # 一键训练+导出+量化 (一次性任务, 需要 docker compose run pipeline)
+  # pipeline 服务定义见 Dockerfile.pipeline, 需挂载 llama.cpp 仓库:
+  #   volumes: - D:/tools/llama.cpp:/opt/llama.cpp:ro
+  pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile.pipeline
+    profiles: ["train"]
+    volumes:
+      - ./models:/work/models
+      - ./data:/work/data
+      - ./pipeline:/work/pipeline

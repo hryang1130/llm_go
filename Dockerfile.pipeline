@@ -1,0 +1,12 @@
+# 阶段 1-3: 训练 / 导出 / 量化 (Python 工具链)
+FROM python:3.11-slim AS pipeline
+
+WORKDIR /work
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY pipeline/ pipeline/
+COPY data/ data/
+
+# 训练并导出 (量化需要 llama.cpp, 见 compose 中注入)
+CMD ["bash", "-c", "python pipeline/train.py && python pipeline/export_gguf.py --llama-cpp /opt/llama.cpp"]

@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM 流水线编排 · 训练 → 导出 → 量化 → 部署</title>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --canvas: #eef0f4;
+    --card: #ffffff;
+    --border: #d9dde3;
+    --text: #1f2937;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --accent-soft: #dbeafe;
+    --ok: #16a34a;
+    --fail: #dc2626;
+    --run: #2563eb;
+    --skip: #9ca3af;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: var(--bg); color: var(--text); overflow: hidden;
+  }
+
+  /* ---------- 顶栏 ---------- */
+  header {
+    height: 52px; display: flex; align-items: center; gap: 12px;
+    padding: 0 16px; background: var(--card); border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 15px; font-weight: 600; }
+  header h1 small { color: var(--muted); font-weight: 400; margin-left: 8px; }
+  .spacer { flex: 1; }
+  button {
+    border: 1px solid var(--border); background: var(--card); color: var(--text);
+    padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 13px;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { opacity: .9; color: #fff; }
+  button.danger { background: var(--fail); border-color: var(--fail); color: #fff; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  #conn { font-size: 12px; color: var(--muted); }
+  #conn .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #d1d5db; margin-right: 5px; }
+  #conn.on .dot { background: var(--ok); }
+
+  /* ---------- 画布 ---------- */
+  #stage { position: absolute; inset: 52px 300px 28px 0; overflow: hidden; background: var(--canvas); cursor: grab; }
+  #stage.panning { cursor: grabbing; }
+  #viewport { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+  #edges { position: absolute; overflow: visible; pointer-events: none; }
+  #edges path { fill: none; stroke: #b6bcc6; stroke-width: 2.5; }
+  #edges path.active { stroke: var(--accent); stroke-width: 3; }
+  #edges path.done { stroke: var(--ok); }
+  #edges path.temp { stroke: var(--accent); stroke-dasharray: 6 4; }
+
+  /* ---------- 节点 ---------- */
+  .wf-node {
+    position: absolute; width: 220px; background: var(--card);
+    border: 2px solid var(--border); border-radius: 12px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.08); cursor: grab; user-select: none;
+  }
+  .wf-node:hover { border-color: var(--accent); }
+  .wf-node.selected { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .wf-node.st-running { border-color: var(--run); animation: pulse 1.2s infinite; }
+  .wf-node.st-success { border-color: var(--ok); }
+  .wf-node.st-failed { border-color: var(--fail); }
+  .wf-node.st-skipped { opacity: .5; }
+  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(37,99,235,.25);} 50% { box-shadow: 0 0 0 8px rgba(37,99,235,0);} }
+  .wf-node .head { display: flex; align-items: center; gap: 8px; padding: 10px 12px 6px; }
+  .wf-node .head .icon { font-size: 18px; }
+  .wf-node .head .title { font-size: 13px; font-weight: 600; }
+  .wf-node .head .badge { margin-left: auto; font-size: 11px; padding: 1px 8px; border-radius: 999px; background: #f3f4f6; color: var(--muted); }
+  .wf-node.st-running .badge { background: var(--accent-soft); color: var(--accent); }
+  .wf-node.st-success .badge { background: #dcfce7; color: var(--ok); }
+  .wf-node.st-failed .badge { background: #fee2e2; color: var(--fail); }
+  .wf-node .desc { padding: 0 12px 8px; font-size: 11px; color: var(--muted); line-height: 1.5; }
+  .wf-node .logs {
+    display: none; margin: 0 8px 8px; max-height: 130px; overflow-y: auto;
+    background: #0f172a; color: #a5f3a5; border-radius: 8px;
+    font: 10.5px/1.5 Consolas, monospace; padding: 6px 8px; white-space: pre-wrap; word-break: break-all;
+  }
+  .wf-node .logs.show { display: block; }
+  .dot-in, .dot-out {
+    position: absolute; top: 20px; width: 12px; height: 12px; border-radius: 50%;
+    background: var(--card); border: 2.5px solid var(--accent); cursor: crosshair; z-index: 2;
+  }
+  .dot-in { left: -7px; }
+  .dot-out { right: -7px; }
+  .dot-in:hover, .dot-out:hover { transform: scale(1.3); }
+
+  /* ---------- 参数面板 ---------- */
+  #panel {
+    position: absolute; top: 52px; right: 0; bottom: 28px; width: 300px;
+    background: var(--card); border-left: 1px solid var(--border); padding: 16px; overflow-y: auto;
+  }
+  #panel h2 { font-size: 14px; margin-bottom: 4px; }
+  #panel .desc { font-size: 12px; color: var(--muted); margin-bottom: 14px; line-height: 1.6; }
+  #panel .field { margin-bottom: 12px; }
+  #panel label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  #panel input {
+    width: 100%; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px;
+    font-size: 13px; outline: none;
+  }
+  #panel input:focus { border-color: var(--accent); }
+  #panel .empty { color: var(--muted); font-size: 13px; text-align: center; margin-top: 60px; line-height: 2; }
+  #panel .actions { margin-top: 18px; display: flex; flex-direction: column; gap: 8px; }
+
+  /* ---------- 底部状态栏 ---------- */
+  footer {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 28px;
+    background: var(--card); border-top: 1px solid var(--border);
+    display: flex; align-items: center; padding: 0 16px; font-size: 12px; color: var(--muted); gap: 14px;
+  }
+  footer .legend span::before { content: "●"; margin: 0 4px 0 10px; }
+  .lg-idle::before { color: #d1d5db; } .lg-run::before { color: var(--run); }
+  .lg-ok::before { color: var(--ok); } .lg-fail::before { color: var(--fail); } .lg-skip::before { color: var(--skip); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>LLM 流水线编排<small>训练 → 导出 GGUF → 量化 → 部署</small></h1>
+  <div class="spacer"></div>
+  <span id="conn"><span class="dot"></span>未连接</span>
+  <button id="btn-run" class="primary">▶ 运行全部</button>
+  <button id="btn-stop" disabled>■ 停止</button>
+  <button id="btn-reset">↺ 恢复默认布局</button>
+</header>
+
+<div id="stage">
+  <div id="viewport">
+    <svg id="edges"></svg>
+    <div id="nodes"></div>
+  </div>
+</div>
+
+<div id="panel"><div class="empty">点击节点查看 / 编辑参数<br>拖拽节点右侧圆点连接到下一节点<br>拖拽空白处平移 · 滚轮缩放</div></div>
+
+<footer>
+  <span id="status-text">就绪</span>
+  <span class="spacer"></span>
+  <span class="legend">
+    <span class="lg-idle">待运行</span><span class="lg-run">运行中</span>
+    <span class="lg-ok">成功</span><span class="lg-fail">失败</span><span class="lg-skip">跳过</span>
+  </span>
+</footer>
+
+<script>
+"use strict";
+const API = {
+  workflow: "/api/workflow",
+  run: "/api/run",
+  cancel: "/api/cancel",
+  health: "/healthz",
+};
+
+let def = null;            // {nodes, edges}
+let positions = {};        // id -> {x,y} (视口坐标)
+let params = {};           // "node.key" -> value
+let statuses = {};         // id -> idle|running|success|failed|skipped
+let selected = null;
+let running = false;
+let view = { x: 20, y: 20, scale: 1 };
+
+// DOM
+const stage = document.getElementById("stage");
+const viewport = document.getElementById("viewport");
+const nodesEl = document.getElementById("nodes");
+const edgesEl = document.getElementById("edges");
+const panel = document.getElementById("panel");
+const statusText = document.getElementById("status-text");
+const btnRun = document.getElementById("btn-run");
+const btnStop = document.getElementById("btn-stop");
+const btnReset = document.getElementById("btn-reset");
+const connEl = document.getElementById("conn");
+
+const NODE_W = 220, ANCHOR_Y = 24;
+
+// ---------- localStorage ----------
+const LS = { pos: "wf_pos_v1", edge: "wf_edges_v1", param: "wf_params_v1", view: "wf_view_v1" };
+function loadLS() {
+  try { positions = JSON.parse(localStorage.getItem(LS.pos)) || {}; } catch (e) { positions = {}; }
+  try { savedEdges = JSON.parse(localStorage.getItem(LS.edge)) || null; } catch (e) { savedEdges = null; }
+  try { params = JSON.parse(localStorage.getItem(LS.param)) || {}; } catch (e) { params = {}; }
+  try { const v = JSON.parse(localStorage.getItem(LS.view)); if (v) view = v; } catch (e) {}
+}
+let savedEdges = null;
+function saveLS() {
+  localStorage.setItem(LS.pos, JSON.stringify(positions));
+  localStorage.setItem(LS.edge, JSON.stringify(def.edges));
+  localStorage.setItem(LS.param, JSON.stringify(params));
+  localStorage.setItem(LS.view, JSON.stringify(view));
+}
+
+// ---------- 初始化 ----------
+async function init() {
+  loadLS();
+  const res = await fetch(API.workflow);
+  def = await res.json();
+  if (savedEdges && Array.isArray(savedEdges) && savedEdges.length) def.edges = savedEdges;
+  def.nodes.forEach(n => {
+    if (!positions[n.id]) positions[n.id] = { x: n.x, y: n.y };
+    n.params.forEach(p => {
+      const k = n.id + "." + p.key;
+      if (!(k in params)) params[k] = p.default;
+    });
+    statuses[n.id] = "idle";
+  });
+  buildNodes();
+  renderEdges();
+  applyView();
+  pollHealth();
+}
+
+function pollHealth() {
+  fetch(API.health).then(r => {
+    connEl.classList.toggle("on", r.ok);
+    connEl.lastChild.textContent = r.ok ? "服务已连接" : "网关在线, 推理服务未启动";
+  }).catch(() => {
+    connEl.classList.remove("on");
+    connEl.lastChild.textContent = "未连接 (请启动 server/llm-gateway.exe)";
+  });
+  setTimeout(pollHealth, 5000);
+}
+
+// ---------- 节点渲染 ----------
+function buildNodes() {
+  nodesEl.innerHTML = "";
+  def.nodes.forEach(n => {
+    const el = document.createElement("div");
+    el.className = "wf-node";
+    el.id = "node-" + n.id;
+    el.innerHTML =
+      '<div class="head"><span class="icon">' + n.icon + '</span>' +
+      '<span class="title">' + n.label + '</span><span class="badge">待运行</span></div>' +
+      '<div class="desc">' + n.desc + '</div>' +
+      '<div class="logs"></div>' +
+      '<div class="dot-in" data-node="' + n.id + '"></div>' +
+      '<div class="dot-out" data-node="' + n.id + '"></div>';
+    el.style.left = positions[n.id].x + "px";
+    el.style.top = positions[n.id].y + "px";
+    el.addEventListener("mousedown", e => {
+      if (e.target.classList.contains("dot-in") || e.target.classList.contains("dot-out")) return;
+      selectNode(n.id);
+      startDragNode(e, n.id);
+    });
+    el.querySelector(".dot-out").addEventListener("mousedown", e => {
+      e.stopPropagation();
+      startConnect(e, n.id);
+    });
+    nodesEl.appendChild(el);
+  });
+}
+
+function setNodeStatus(id, st) {
+  statuses[id] = st;
+  const el = document.getElementById("node-" + id);
+  if (!el) return;
+  el.className = "wf-node selected" === el.className ? el.className : "wf-node";
+  if (selected === id) el.classList.add("selected");
+  if (st !== "idle") el.classList.add("st-" + st);
+  const badge = el.querySelector(".badge");
+  badge.textContent = { idle: "待运行", running: "运行中…", success: "✓ 成功", failed: "✗ 失败", skipped: "已跳过" }[st] || st;
+  // 边高亮: 前驱成功 -> active
+  renderEdges();
+}
+
+function nodeLogs(id) {
+  return document.querySelector("#node-" + id + " .logs");
+}
+function appendLog(id, line) {
+  const box = nodeLogs(id);
+  if (!box) return;
+  box.classList.add("show");
+  box.textContent += line + "\n";
+  while (box.textContent.split("\n").length > 300) {
+    box.textContent = box.textContent.slice(box.textContent.indexOf("\n") + 1);
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+// ---------- 边渲染 ----------
+function anchorOut(id) {
+  const p = positions[id];
+  return { x: p.x + NODE_W + 6, y: p.y + ANCHOR_Y };
+}
+function anchorIn(id) {
+  const p = positions[id];
+  return { x: p.x - 6, y: p.y + ANCHOR_Y };
+}
+function edgePath(a, b) {
+  const dx = Math.max(40, (b.x - a.x) * 0.5);
+  return `M ${a.x} ${a.y} C ${a.x + dx} ${a.y}, ${b.x - dx} ${b.y}, ${b.x} ${b.y}`;
+}
+function renderEdges() {
+  let html = "";
+  def.edges.forEach(e => {
+    let cls = "";
+    if (statuses[e.to] === "running") cls = statuses[e.from] === "success" ? "active" : "";
+    else if (statuses[e.to] === "success" || statuses[e.to] === "failed") cls = "done";
+    html += `<path class="${cls}" d="${edgePath(anchorOut(e.from), anchorIn(e.to))}"/>`;
+  });
+  if (tempEdge) html += `<path class="temp" d="${tempEdge}"/>`;
+  edgesEl.innerHTML = html;
+  edgesEl.setAttribute("width", 4000);
+  edgesEl.setAttribute("height", 2400);
+  edgesEl.style.position = "absolute";
+}
+
+// ---------- 拖拽节点 ----------
+let dragging = null;
+function startDragNode(e, id) {
+  e.preventDefault();
+  const pt = toWorld(e.clientX, e.clientY);
+  dragging = { id, dx: pt.x - positions[id].x, dy: pt.y - positions[id].y };
+  stage.classList.add("panning");
+}
+function toWorld(cx, cy) {
+  const rect = stage.getBoundingClientRect();
+  return { x: (cx - rect.left - view.x) / view.scale, y: (cy - rect.top - view.y) / view.scale };
+}
+
+// ---------- 连线 ----------
+let connecting = null;   // 起始节点 id
+let tempEdge = null;
+function startConnect(e, fromId) {
+  e.preventDefault();
+  connecting = fromId;
+  const a = anchorOut(fromId);
+  tempEdge = edgePath(a, a);
+}
+function finishConnect(e) {
+  if (!connecting) return;
+  const target = document.elementFromPoint(e.clientX, e.clientY);
+  const dotIn = target && target.closest ? target.closest(".dot-in") : null;
+  if (dotIn) {
+    const toId = dotIn.dataset.node;
+    if (toId !== connecting && !def.edges.some(x => x.from === connecting && x.to === toId)) {
+      def.edges.push({ from: connecting, to: toId });
+      saveLS();
+    }
+  }
+  connecting = null; tempEdge = null;
+  renderEdges();
+}
+
+// ---------- 画布平移/缩放 ----------
+stage.addEventListener("mousedown", e => {
+  if (e.target === stage || e.target === viewport || e.target === edgesEl || e.target === nodesEl) {
+    selectNode(null);
+    stage._pan = { x: e.clientX - view.x, y: e.clientY - view.y };
+    stage.classList.add("panning");
+  }
+});
+window.addEventListener("mousemove", e => {
+  if (dragging) {
+    const pt = toWorld(e.clientX, e.clientY);
+    positions[dragging.id] = { x: pt.x - dragging.dx, y: pt.y - dragging.dy };
+    const el = document.getElementById("node-" + dragging.id);
+    el.style.left = positions[dragging.id].x + "px";
+    el.style.top = positions[dragging.id].y + "px";
+    renderEdges();
+  } else if (connecting) {
+    const a = anchorOut(connecting);
+    const pt = toWorld(e.clientX, e.clientY);
+    tempEdge = edgePath(a, { x: pt.x, y: pt.y });
+    renderEdges();
+  } else if (stage._pan) {
+    view.x = e.clientX - stage._pan.x;
+    view.y = e.clientY - stage._pan.y;
+    applyView();
+  }
+});
+window.addEventListener("mouseup", e => {
+  if (dragging) { dragging = null; saveLS(); }
+  if (connecting) finishConnect(e);
+  stage._pan = null;
+  stage.classList.remove("panning");
+});
+stage.addEventListener("wheel", e => {
+  e.preventDefault();
+  const rect = stage.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+  const ns = Math.min(2, Math.max(0.4, view.scale * factor));
+  view.x = mx - (mx - view.x) * (ns / view.scale);
+  view.y = my - (my - view.y) * (ns / view.scale);
+  view.scale = ns;
+  applyView();
+}, { passive: false });
+function applyView() {
+  viewport.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale})`;
+}
+
+// ---------- 参数面板 ----------
+function selectNode(id) {
+  selected = id;
+  document.querySelectorAll(".wf-node").forEach(el => el.classList.remove("selected"));
+  if (!id) { renderPanelEmpty(); renderEdges(); return; }
+  document.getElementById("node-" + id).classList.add("selected");
+  const n = def.nodes.find(x => x.id === id);
+  let html = `<h2>${n.icon} ${n.label}</h2><div class="desc">${n.desc}</div>`;
+  n.params.forEach(p => {
+    const k = n.id + "." + p.key;
+    html += `<div class="field"><label>${p.label}</label>` +
+      `<input data-key="${k}" value="${escapeHtml(params[k])}"></div>`;
+  });
+  html += `<div class="actions">` +
+    `<button class="primary" onclick="runOnly('${n.id}')">▶ 仅运行此节点</button>` +
+    `<button onclick="deleteEdgesOf('${n.id}')">✂ 删除相关连线</button></div>`;
+  panel.innerHTML = html;
+  panel.querySelectorAll("input").forEach(inp => {
+    inp.addEventListener("change", () => {
+      params[inp.dataset.key] = inp.value;
+      saveLS();
+    });
+  });
+}
+function renderPanelEmpty() {
+  panel.innerHTML = '<div class="empty">点击节点查看 / 编辑参数<br>拖拽节点右侧圆点连接到下一节点<br>拖拽空白处平移 · 滚轮缩放</div>';
+}
+function deleteEdgesOf(id) {
+  def.edges = def.edges.filter(e => e.from !== id && e.to !== id);
+  saveLS(); renderEdges();
+}
+function escapeHtml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+
+// ---------- 执行 ----------
+async function runWorkflow(only) {
+  if (running) return;
+  running = true;
+  btnRun.disabled = true;
+  btnStop.disabled = false;
+  statusText.textContent = only ? `运行节点: ${only.join(", ")}` : "运行全部节点…";
+
+  // 重置状态
+  def.nodes.forEach(n => {
+    statuses[n.id] = "idle";
+    const el = document.getElementById("node-" + n.id);
+    el.className = "wf-node";
+    const box = nodeLogs(n.id);
+    if (box) { box.textContent = ""; box.classList.remove("show"); }
+  });
+
+  try {
+    const resp = await fetch(API.run, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ params, only: only || [] }),
+    });
+    if (!resp.ok || !resp.body) {
+      const msg = await resp.json().catch(() => ({}));
+      statusText.textContent = "启动失败: " + (msg.error || resp.status);
+      return;
+    }
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const chunk = buf.slice(0, idx); buf = buf.slice(idx + 2);
+        if (chunk.startsWith("data: ")) handleEvent(JSON.parse(chunk.slice(6)));
+      }
+    }
+  } catch (err) {
+    statusText.textContent = "连接中断: " + err.message;
+  } finally {
+    running = false;
+    btnRun.disabled = false;
+    btnStop.disabled = true;
+  }
+}
+window.runOnly = id => runWorkflow([id]);
+
+let doneCount = 0;
+function handleEvent(ev) {
+  if (ev.event === "status") {
+    setNodeStatus(ev.node, ev.status);
+    if (ev.status === "running" || ev.status === "success") {
+      if (ev.status === "success") doneCount++;
+      const total = def.nodes.length;
+      statusText.textContent = `进度 ${doneCount}/${total} — ${ev.node} ${ev.status === "running" ? "运行中" : "完成"}`;
+    }
+  } else if (ev.event === "log") {
+    appendLog(ev.node, ev.line);
+  } else if (ev.event === "done") {
+    doneCount = 0;
+    statusText.textContent = ev.ok ? "✓ 工作流执行完成" : "✗ 工作流失败 (详情见节点日志)";
+  }
+}
+
+// ---------- 工具栏 ----------
+btnRun.addEventListener("click", () => runWorkflow(null));
+btnStop.addEventListener("click", async () => {
+  await fetch(API.cancel, { method: "POST" });
+  statusText.textContent = "已请求停止…";
+});
+btnReset.addEventListener("click", () => {
+  def.nodes.forEach(n => { positions[n.id] = { x: n.x, y: n.y }; });
+  // 恢复默认连线 (拓扑序)
+  def.edges = def.nodes.slice(0, -1).map((n, i) => ({ from: n.id, to: def.nodes[i + 1].id }));
+  view = { x: 20, y: 20, scale: 1 };
+  applyView(); buildNodes(); renderEdges(); saveLS(); renderPanelEmpty();
+});
+
+init();
+</script>
+</body>
+</html>

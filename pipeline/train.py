@@ -33,7 +33,7 @@ def load_config() -> dict:
 
 def train_tokenizer(cfg: dict):
     """在本地语料上训练一个 BPE 分词器。"""
-    from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
+    from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders, Regex
     from transformers import PreTrainedTokenizerFast
 
     mcfg = cfg["model"]
@@ -44,7 +44,15 @@ def train_tokenizer(cfg: dict):
 
     print(f"[tokenizer] 在 {corpus} 上训练 BPE 分词器, 词表 {mcfg['vocab_size']} ...")
     tok = Tokenizer(models.BPE())
-    tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    # 使用 GPT-2 标准预分词规则: llama.cpp 的转换器按此识别词表 (否则报
+    # "BPE pre-tokenizer was not recognized")
+    tok.pre_tokenizer = pre_tokenizers.Sequence([
+        pre_tokenizers.Split(
+            pattern=Regex("'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+"),
+            behavior="isolated",
+        ),
+        pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False, trim_offsets=True),
+    ])
     tok.decoder = decoders.ByteLevel()
     trainer = trainers.BpeTrainer(
         vocab_size=mcfg["vocab_size"],
@@ -75,7 +83,7 @@ def build_dataset(cfg: dict, tokenizer, block_size: int):
     ids = tokenizer.encode(text)
     print(f"[data] 语料共 {len(text)} 字符, 编码为 {len(ids)} 个 token")
 
-    step = block_size  # 不重叠滑窗 (语料少时重叠能增加样本量)
+    step = max(1, block_size // 2)  # 半重叠滑窗, 小语料也能切出足够样本
     chunks = [ids[i:i + block_size + 1] for i in range(0, len(ids) - 1, step)]
     chunks = [c for c in chunks if len(c) == block_size + 1]
 

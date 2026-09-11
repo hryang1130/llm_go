@@ -101,13 +101,19 @@ def main():
     if not (hf_dir / "tokenizer.model").exists() and not (hf_dir / "tokenizer.json").exists():
         sys.exit("[export] 训练产物缺少分词器文件")
 
-    llama_cpp = find_llama_cpp(args.llama_cpp)
-    print(f"[export] llama.cpp 仓库: {llama_cpp}")
+    llama_cpp = find_llama_cpp(args.llama_cpp) if not args.skip_convert else None
+    if llama_cpp:
+        print(f"[export] llama.cpp 仓库: {llama_cpp}")
+    else:
+        # 跳过转换时只需量化器, 单独定位
+        llama_cpp = find_llama_cpp(args.llama_cpp)
 
     f16_path = ROOT / paths["gguf_f16"]
     if not args.skip_convert:
-        run([sys.executable, llama_cpp / "convert_hf_to_gguf.py",
-             hf_dir, "--outfile", f16_path, "--outtype", "f16"])
+        # 使用项目自带的 GGUF 导出器 (llama.cpp 官方 convert_hf_to_gguf.py
+        # 的词表白名单不收录从零自训的分词器, 会报
+        # "BPE pre-tokenizer was not recognized")
+        run([sys.executable, ROOT / "pipeline" / "write_gguf.py"])
     else:
         print(f"[export] 跳过转换, 使用现有 {f16_path}")
     if not f16_path.exists():
@@ -116,7 +122,16 @@ def main():
     quantizer = find_quantize_binary(llama_cpp, args.quantize)
     q4_path = ROOT / paths["gguf_q4"]
     print(f"[quantize] {f16_path.name} -> {q4_path.name} ({qtype})")
-    run([quantizer, f16_path, q4_path, qtype])
+    # 注: 部分版本 llama-quantize 在输出重定向到管道时会以 iostream 错误
+    # 返回非零, 但量化产物实际已生成。这里改为以产物文件为准。
+    log_path = ROOT / "out" / "quantize.log"
+    log_path.parent.mkdir(exist_ok=True)
+    with open(log_path, "w", encoding="utf-8", errors="replace") as log:
+        subprocess.run([str(c) for c in (quantizer, f16_path, q4_path, qtype)],
+                       stdout=log, stderr=subprocess.STDOUT)
+    print(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-1])
+    if not q4_path.exists() or q4_path.stat().st_size == 0:
+        sys.exit(f"[quantize] 量化失败, 详见 {log_path}")
 
     f16_mb = f16_path.stat().st_size / 1e6
     q4_mb = q4_path.stat().st_size / 1e6

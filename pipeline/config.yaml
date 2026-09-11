@@ -15,7 +15,7 @@ model:
 train:
   block_size: 256             # 训练序列长度
   batch_size: 8
-  epochs: 30
+  epochs: 150                 # 小模型需要足够轮数让输出收敛到语料分布
   learning_rate: 3.0e-4
   warmup_steps: 30
   logging_steps: 10

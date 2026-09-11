@@ -86,6 +86,10 @@ python pipeline/export_gguf.py --llama-cpp D:/tools/llama.cpp
 
 产物: `models/tinyllm-f16.gguf`
 
+> 导出使用项目自带的 `pipeline/write_gguf.py`（基于 gguf-py 手工写出 llama 架构 GGUF）。
+> 不用官方 `convert_hf_to_gguf.py` 的原因：它通过哈希白名单识别 BPE 分词器，
+> 从零自训的词表永远不在名单里，会报 "BPE pre-tokenizer was not recognized"。
+
 ### 3. 量化 (Q4_K_M)
 
 ```bash
@@ -133,4 +137,8 @@ docker compose run pipeline   # 一键训练+导出 (需挂载 llama.cpp 仓库,
 - **换语料**: 替换 `data/corpus.txt`，语料越多模型越"像话"（建议至少几百 KB 纯文本）
 - **调模型**: 改 `pipeline/config.yaml` 的 `model` 段（层数/维度），注意 CPU 训练时间会随之增长
 - **换量化方案**: 改 `config.yaml` 的 `quantize.type`（Q8_0 更准、Q4_K_S 更小）
+- **常见坑**:
+  - Trainer 需要 `accelerate`（已写入 requirements.txt）
+  - llama-quantize 在输出重定向到管道时可能报 iostream 错误并返回非零，但产物已生成——`export_gguf.py` 已按产物判断成败
+  - 新版 llama-server 对非流式 `/completion` 输出做严格 UTF-8 校验，小模型偶发的坏字节会 500；流式请求不受影响（工作流测试节点已用流式）
 - **上 LoRA 微调**: 把 train.py 换成 peft 的 LoRA 训练 HF 现成模型（如 Qwen3-0.6B），后续导出/量化/部署流程完全复用

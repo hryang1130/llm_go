@@ -70,7 +70,7 @@ func workflowDef() WFDef {
 				ID: "train", Label: "模型训练", Icon: "🏋️", X: 320, Y: 200,
 				Desc: "BPE 分词 + 从零训练小型 LLaMA",
 				Params: []WFParam{
-					{Key: "epochs", Label: "训练轮数", Default: "30"},
+					{Key: "epochs", Label: "训练轮数", Default: "150"},
 					{Key: "batch_size", Label: "批大小", Default: "8"},
 				},
 			},
@@ -212,7 +212,7 @@ func (r *workflowRunner) runNode(ctx context.Context, node string, req *runReque
 		cmd.Dir = r.root
 
 	case "train":
-		epochs := r.param(req, node, "epochs", "30")
+		epochs := r.param(req, node, "epochs", "150")
 		batch := r.param(req, node, "batch_size", "8")
 		cmd = exec.CommandContext(ctx, r.pythonCmd, "pipeline/train.py",
 			"--epochs", epochs, "--batch-size", batch)
@@ -293,20 +293,38 @@ func (r *workflowRunner) runNode(ctx context.Context, node string, req *runReque
 		np := r.param(req, node, "n_predict", "48")
 		action = func() error {
 			url := fmt.Sprintf("http://127.0.0.1:%s/completion", r.param(req, "deploy", "port", "8081"))
-			body := fmt.Sprintf(`{"prompt":%q,"n_predict":%s,"temperature":0.8}`, prompt, np)
+			// 用流式接口: 对小模型偶发的坏字节, 非流式会 500, 流式能拿到已生成的部分
+			body := fmt.Sprintf(`{"prompt":%q,"n_predict":%s,"temperature":0.3,"stream":true}`, prompt, np)
 			resp, err := http.Post(url, "application/json", strings.NewReader(body))
 			if err != nil {
 				return fmt.Errorf("请求推理服务失败: %w", err)
 			}
 			defer resp.Body.Close()
-			var out map[string]any
-			if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-				return err
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("推理服务返回 %s", resp.Status)
 			}
-			r.emit(ch, wfEvent{Event: "log", Node: node, Line: fmt.Sprintf("生成结果: %v", out["content"])})
-			if t, ok := out["timings"].(map[string]any); ok {
-				r.emit(ch, wfEvent{Event: "log", Node: node, Line: fmt.Sprintf("生成速度: %.1f tok/s", t["predicted_per_second"])})
+			sc := bufio.NewScanner(resp.Body)
+			var out string
+			for sc.Scan() {
+				line := strings.TrimSpace(sc.Text())
+				if !strings.HasPrefix(line, "data: ") {
+					continue
+				}
+				var chunk struct {
+					Content  string `json:"content"`
+					Stop     bool   `json:"stop"`
+					Timings  map[string]any `json:"timings"`
+				}
+				if json.Unmarshal([]byte(line[6:]), &chunk) == nil {
+					out += chunk.Content
+					if chunk.Timings != nil {
+						if v, ok := chunk.Timings["predicted_per_second"].(float64); ok {
+							r.emit(ch, wfEvent{Event: "log", Node: node, Line: fmt.Sprintf("生成速度: %.1f tok/s", v)})
+						}
+					}
+				}
 			}
+			r.emit(ch, wfEvent{Event: "log", Node: node, Line: fmt.Sprintf("生成结果: %s", out)})
 			return nil
 		}
 

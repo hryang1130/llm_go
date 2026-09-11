@@ -4,8 +4,9 @@
 
 torch>=2.2
 transformers>=4.44
+accelerate>=1.1.0
 tokenizers>=0.19
-datasets>=2.20
 numpy
 pyyaml
 tqdm
+sentencepiece

@@ -8,7 +8,7 @@
 ┌─────────────┐   ┌──────────────┐   ┌───────────────┐   ┌──────────────┐
 │ 阶段1 训练   │──▶│ 阶段2 导出    │──▶│ 阶段3 量化     │──▶│ 阶段4 部署    │
 │ pipeline/   │   │ HF → GGUF    │   │ F16 → Q4_K_M  │   │ Go 网关 +    │
-│ train.py    │   │ convert_hf_  │   │ llama-        │   │ llama-server │
+│ train.py    │   │ write_gguf.py│   │ llama-        │   │ llama-server │
 │ (transformers)  │ to_gguf.py   │   │ quantize      │   │ (Gin, OpenAI │
 │             │   │ (llama.cpp)  │   │               │   │  兼容 API)   │
 └─────────────┘   └──────────────┘   └───────────────┘   └──────────────┘
@@ -24,7 +24,8 @@ llm_go/
 ├── pipeline/
 │   ├── config.yaml          # 全局配置: 模型结构 / 训练超参 / 路径 / 量化方案
 │   ├── train.py             # 阶段1: BPE 分词 + 从零训练 LLaMA
-│   ├── export_gguf.py       # 阶段2+3: HF→GGUF(F16) + 量化(Q4_K_M)
+│   ├── export_gguf.py       # 阶段2+3: 编排导出与量化
+│   ├── write_gguf.py        # 阶段2: 自写 GGUF 导出器 (基于 gguf-py)
 │   └── smoke_test.py        # 冒烟测试 (--hf 测 HF 模型 / --gguf 测服务)
 ├── server/
 │   ├── main.go              # 阶段4: Go 推理网关 (Gin)
@@ -54,61 +55,87 @@ cd server && go run .          # 或运行编译好的 llm-gateway.exe
 
 对应后端 API：`GET /api/workflow`（节点定义）、`POST /api/run`（SSE 执行日志）、`POST /api/cancel`
 
-## 快速开始
+### 一键启动脚本 (Windows)
 
-### 0. 准备环境
+| 脚本 | 作用 |
+|------|------|
+| `start.bat` | 双击启动网关并自动打开工作流界面（自动探测系统 Python、自动清理端口残留） |
+| `stop.bat`  | 一键停止网关与 llama-server |
 
-```bash
-pip install -r requirements.txt      # Python 3.10+, PyTorch CPU 即可
-go version                           # Go 1.22+ (网关)
+`start.bat` 按 `PYTHON_CMD 环境变量 → 系统 PATH 中的 python` 顺序探测 Python。如果你的 Python 不在 PATH 里，先设置再运行：
 
-# 获取 llama.cpp (转换脚本在仓库里; 量化器可从 release 下载)
-git clone https://github.com/ggml-org/llama.cpp D:/tools/llama.cpp
-# 量化器: 从 https://github.com/ggml-org/llama.cpp/releases 下载对应平台包,
-# 把 llama-quantize(.exe) 放入 D:/tools/llama.cpp/bin/
+```bat
+set PYTHON_CMD=D:\envs\llm\Scripts\python.exe
+start.bat
 ```
 
-### 1. 训练
+> 只装 Python 不影响界面启动；训练/导出节点执行时才真正调用它。
+
+## 手动安装部署教程
+
+从零在一台新机器上跑通全流程（以 Windows 为例，Linux/macOS 同理，路径换成对应格式）。
+
+### 1. 安装 Python 环境并装依赖
+
+要求 **Python 3.10+**（CPU 训练即可，无需 GPU）。
 
 ```bash
-python pipeline/train.py                 # 默认 30 epochs, CPU 几分钟
-python pipeline/train.py --epochs 60     # 更久 -> 更低 loss
-python pipeline/smoke_test.py --hf       # 验证生成效果
+# 1) 建议创建独立虚拟环境
+python -m venv D:\envs\llm_go
+D:\envs\llm_go\Scripts\activate          # Linux/macOS: source D:/envs/llm_go/bin/activate
+
+# 2) 安装依赖 (CPU 版 torch 体积小、足够本项目使用)
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt
 ```
 
-产物: `models/tinyllm-hf/`（HuggingFace 格式）+ `models/tokenizer/`
+> Windows 如果 `python` 不在 PATH，后续所有 `python` 命令都要换成完整路径，
+> 或者用 `set PYTHON_CMD=D:\envs\llm_go\Scripts\python.exe` 让工作流引擎使用它。
 
-### 2. 导出 GGUF (F16)
+### 2. 安装 Go (1.22+)
+
+从 https://go.dev/dl/ 下载安装，确认 `go version` ≥ 1.22。然后编译网关：
 
 ```bash
+cd server
+go mod tidy
+go build -o llm-gateway.exe .    # Linux/macOS: go build -o llm-gateway .
+```
+
+### 3. 获取 llama.cpp 运行时
+
+本项目**只需要两个二进制**：`llama-server`（推理服务）和 `llama-quantize`（量化器）。
+导出环节用的是项目自带的 `pipeline/write_gguf.py`，不需要 clone llama.cpp 源码。
+
+- 去 https://github.com/ggml-org/llama.cpp/releases 下载对应平台的包（如 `llama-bXXXX-bin-win-cpu-x64.zip`）
+- 解压到任意目录，例如 `D:\tools\llama.cpp\bin\`（Linux/macOS 也可以自己编译：`cmake -B build && cmake --build build`）
+
+```bash
+# 验证两个二进制可用
+D:/tools/llama.cpp/bin/llama-server.exe --version
+D:/tools/llama.cpp/bin/llama-quantize.exe --version
+```
+
+### 4. 跑通流水线（命令行方式）
+
+```bash
+# ① 数据准备 + 训练
+python pipeline/train.py --epochs 150
+
+# ② 导出 GGUF (F16) + 量化 (Q4_K_M)
 python pipeline/export_gguf.py --llama-cpp D:/tools/llama.cpp
+# 产物: models/tinyllm-f16.gguf -> models/tinyllm-q4_k_m.gguf
+# 注: 导出用项目自带 write_gguf.py 而非官方 convert_hf_to_gguf.py,
+#     因为后者用哈希白名单识别分词器, 从零自训的词表无法通过识别
+
+# ③ 启动推理服务 (终端 1)
+D:/tools/llama.cpp/bin/llama-server.exe -m models/tinyllm-q4_k_m.gguf --host 127.0.0.1 --port 8081 --ctx-size 512
+
+# ④ 启动 Go 网关 (终端 2)
+cd server && ./llm-gateway.exe
 ```
 
-产物: `models/tinyllm-f16.gguf`
-
-> 导出使用项目自带的 `pipeline/write_gguf.py`（基于 gguf-py 手工写出 llama 架构 GGUF）。
-> 不用官方 `convert_hf_to_gguf.py` 的原因：它通过哈希白名单识别 BPE 分词器，
-> 从零自训的词表永远不在名单里，会报 "BPE pre-tokenizer was not recognized"。
-
-### 3. 量化 (Q4_K_M)
-
-```bash
-python pipeline/export_gguf.py --llama-cpp D:/tools/llama.cpp --skip-convert
-```
-
-产物: `models/tinyllm-q4_k_m.gguf`（体积约为 F16 的 1/4）
-
-### 4. 部署
-
-```bash
-# 终端 1: 启动 llama.cpp 推理服务
-llama-server -m models/tinyllm-q4_k_m.gguf --host 127.0.0.1 --port 8081 --ctx-size 512
-
-# 终端 2: 启动 Go 网关
-cd server && go run .
-```
-
-测试:
+验证：
 
 ```bash
 curl http://localhost:8080/healthz
@@ -123,9 +150,26 @@ curl -N http://localhost:8080/v1/chat/completions \
   -d '{"messages":[{"role":"user","content":"深度学习"}],"stream":true}'
 ```
 
-Go 网关环境变量: `LLAMA_SERVER_URL`(默认 http://127.0.0.1:8081)、`GATEWAY_PORT`(默认 8080)、`DEFAULT_MAX_TOKENS`、`DEFAULT_TEMP`
+### 5. 跑通流水线（可视化界面方式）
 
-### Docker 部署 (可选)
+启动网关后打开 http://localhost:8080/web/ ，点「▶ 运行全部」即可。
+使用前在界面上检查两处参数：
+
+- **导出 GGUF 节点** → `llamacpp_dir`：填第 3 步的 llama.cpp 目录（如 `D:/tools/llama.cpp`）
+- **模型训练节点** → 训练轮数等参数按需调整（默认 150）
+
+网关的环境变量（可选）：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `PYTHON_CMD` | `python` | 工作流节点调用的 Python 解释器（**建议指向你的虚拟环境**） |
+| `LLAMA_CPP_DIR` | — | llama.cpp 目录默认值（也可在界面参数里填） |
+| `GATEWAY_PORT` | `8080` | 网关监听端口 |
+| `LLAMA_SERVER_URL` | `http://127.0.0.1:8081` | 上游 llama-server 地址 |
+
+其他网关参数: `DEFAULT_MAX_TOKENS`、`DEFAULT_TEMP`
+
+### 6. Docker 部署 (可选)
 
 ```bash
 docker compose up -d          # 启动 llama-server + gateway

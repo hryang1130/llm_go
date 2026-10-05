@@ -6,18 +6,26 @@
 <title>LLM 流水线编排 · 训练 → 导出 → 量化 → 部署</title>
 <style>
   :root {
-    --bg: #f5f6f8;
-    --canvas: #eef0f4;
+    --bg: #0b1020;
+    --canvas: #0d1226;
+    --panel: #121a33;
     --card: #ffffff;
-    --border: #d9dde3;
-    --text: #1f2937;
+    --border: #e2e6ef;
+    --text: #111827;
     --muted: #6b7280;
-    --accent: #2563eb;
-    --accent-soft: #dbeafe;
-    --ok: #16a34a;
-    --fail: #dc2626;
-    --run: #2563eb;
+    --accent: #6366f1;
+    --accent-2: #8b5cf6;
+    --accent-soft: #eef0ff;
+    --ok: #10b981;
+    --ok-soft: #d7f5ea;
+    --fail: #ef4444;
+    --fail-soft: #fde5e5;
+    --run: #6366f1;
     --skip: #9ca3af;
+    --grid: rgba(148,163,184,.10);
+    --header-h: 58px;
+    --footer-h: 34px;
+    --panel-w: 316px;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; }
@@ -28,114 +36,206 @@
 
   /* ---------- 顶栏 ---------- */
   header {
-    height: 52px; display: flex; align-items: center; gap: 12px;
-    padding: 0 16px; background: var(--card); border-bottom: 1px solid var(--border);
+    height: var(--header-h); display: flex; align-items: center; gap: 14px;
+    padding: 0 18px;
+    background: linear-gradient(90deg, #111834 0%, #1a1440 60%, #241546 100%);
+    border-bottom: 1px solid rgba(148,163,184,.15);
+    color: #e5e9f5;
   }
-  header h1 { font-size: 15px; font-weight: 600; }
-  header h1 small { color: var(--muted); font-weight: 400; margin-left: 8px; }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand .logo {
+    width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center;
+    font-size: 16px;
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+    box-shadow: 0 2px 10px rgba(99,102,241,.45);
+  }
+  .brand h1 { font-size: 15px; font-weight: 700; letter-spacing: .3px; color: #fff; }
+  .brand h1 small {
+    font-weight: 400; margin-left: 10px; font-size: 12px; color: #94a3c0;
+    padding-left: 12px; border-left: 1px solid rgba(148,163,184,.25);
+  }
   .spacer { flex: 1; }
-  button {
-    border: 1px solid var(--border); background: var(--card); color: var(--text);
-    padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 13px;
+
+  #conn {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; color: #94a3c0;
+    background: rgba(148,163,184,.12); border: 1px solid rgba(148,163,184,.2);
+    padding: 5px 12px; border-radius: 999px;
   }
-  button:hover { border-color: var(--accent); color: var(--accent); }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  button.primary:hover { opacity: .9; color: #fff; }
-  button.danger { background: var(--fail); border-color: var(--fail); color: #fff; }
-  button:disabled { opacity: .45; cursor: not-allowed; }
-  #conn { font-size: 12px; color: var(--muted); }
-  #conn .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #d1d5db; margin-right: 5px; }
-  #conn.on .dot { background: var(--ok); }
+  #conn .dot { width: 8px; height: 8px; border-radius: 50%; background: #64748b; transition: background .3s; }
+  #conn.on { color: #a7f3d0; border-color: rgba(16,185,129,.35); background: rgba(16,185,129,.12); }
+  #conn.on .dot { background: var(--ok); box-shadow: 0 0 6px rgba(16,185,129,.8); }
+
+  button {
+    border: 1px solid rgba(148,163,184,.3); background: rgba(148,163,184,.1); color: #dbe2f2;
+    padding: 7px 16px; border-radius: 9px; cursor: pointer; font-size: 13px; font-weight: 500;
+    transition: all .15s ease;
+  }
+  button:hover { border-color: var(--accent); color: #fff; background: rgba(99,102,241,.18); }
+  button.primary {
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+    border: none; color: #fff; font-weight: 600;
+    box-shadow: 0 2px 12px rgba(99,102,241,.4);
+  }
+  button.primary:hover { filter: brightness(1.1); color: #fff; }
+  button.danger { background: var(--fail); border: none; color: #fff; }
+  button.danger:hover { filter: brightness(1.1); color: #fff; }
+  button:disabled { opacity: .4; cursor: not-allowed; filter: none; }
 
   /* ---------- 画布 ---------- */
-  #stage { position: absolute; inset: 52px 300px 28px 0; overflow: hidden; background: var(--canvas); cursor: grab; }
+  #stage {
+    position: absolute; inset: var(--header-h) var(--panel-w) var(--footer-h) 0;
+    overflow: hidden; cursor: grab; background: var(--canvas);
+    background-image: radial-gradient(var(--grid) 1.2px, transparent 1.2px);
+    background-size: 22px 22px;
+  }
   #stage.panning { cursor: grabbing; }
+
   #viewport { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
   #edges { position: absolute; overflow: visible; pointer-events: none; }
-  #edges path { fill: none; stroke: #b6bcc6; stroke-width: 2.5; }
-  #edges path.active { stroke: var(--accent); stroke-width: 3; }
+  #edges path { fill: none; stroke: rgba(148,163,184,.55); stroke-width: 2.5; }
+  #edges path.active {
+    stroke: var(--accent); stroke-width: 3;
+    stroke-dasharray: 8 6; animation: flow 1s linear infinite;
+  }
   #edges path.done { stroke: var(--ok); }
-  #edges path.temp { stroke: var(--accent); stroke-dasharray: 6 4; }
+  #edges path.temp { stroke: var(--accent); stroke-dasharray: 6 5; }
+  @keyframes flow { to { stroke-dashoffset: -14; } }
+
+  /* ---------- 画布悬浮工具条 ---------- */
+  #canvas-tools {
+    position: absolute; left: 14px; bottom: 14px; display: flex; gap: 6px; z-index: 10;
+  }
+  #canvas-tools button {
+    width: 34px; height: 34px; padding: 0; border-radius: 9px; font-size: 15px;
+    display: grid; place-items: center;
+    background: var(--panel); border: 1px solid rgba(148,163,184,.25); color: #cbd5f0;
+    box-shadow: 0 4px 14px rgba(0,0,0,.35);
+  }
+  #canvas-tools button:hover { border-color: var(--accent); }
+  #zoom-label {
+    min-width: 34px; display: grid; place-items: center; font-size: 11px; color: #8ea0c5;
+    background: var(--panel); border: 1px solid rgba(148,163,184,.25); border-radius: 9px;
+  }
 
   /* ---------- 节点 ---------- */
   .wf-node {
-    position: absolute; width: 220px; background: var(--card);
-    border: 2px solid var(--border); border-radius: 12px;
-    box-shadow: 0 1px 3px rgba(0,0,0,.08); cursor: grab; user-select: none;
+    position: absolute; width: 224px; background: var(--card);
+    border: 2px solid var(--border); border-radius: 14px;
+    box-shadow: 0 2px 6px rgba(15,23,42,.10), 0 10px 28px rgba(15,23,42,.08);
+    cursor: grab; user-select: none; transition: box-shadow .15s, transform .15s;
   }
-  .wf-node:hover { border-color: var(--accent); }
-  .wf-node.selected { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .wf-node:hover { border-color: var(--accent); box-shadow: 0 4px 10px rgba(99,102,241,.18), 0 12px 32px rgba(15,23,42,.12); }
+  .wf-node.selected { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft), 0 12px 32px rgba(99,102,241,.22); }
   /* 可选阶段 (SFT / 评测 / 投机解码等): 虚线边框 + 「可选」标记, 默认不参与「运行全部」 */
-  .wf-node.optional { border-style: dashed; }
+  .wf-node.optional { border-style: dashed; background: #fcfcff; }
   .wf-node.optional .tag-opt {
-    font-size: 10px; padding: 1px 6px; border-radius: 999px;
-    background: var(--accent-soft); color: var(--accent); margin-left: 6px;
-    vertical-align: middle;
+    font-size: 10px; padding: 2px 8px; border-radius: 999px; font-weight: 600;
+    background: linear-gradient(135deg, #ede9fe, #e0e7ff); color: #7c3aed;
   }
-  .wf-node.st-running { border-color: var(--run); animation: pulse 1.2s infinite; }
+  .wf-node.st-running { border-color: var(--run); animation: pulse 1.4s infinite; }
   .wf-node.st-success { border-color: var(--ok); }
-  .wf-node.st-failed { border-color: var(--fail); }
-  .wf-node.st-skipped { opacity: .5; }
-  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(37,99,235,.25);} 50% { box-shadow: 0 0 0 8px rgba(37,99,235,0);} }
-  .wf-node .head { display: flex; align-items: center; gap: 8px; padding: 10px 12px 6px; }
-  .wf-node .head .icon { font-size: 18px; }
-  .wf-node .head .title { font-size: 13px; font-weight: 600; }
-  .wf-node .head .badge { margin-left: auto; font-size: 11px; padding: 1px 8px; border-radius: 999px; background: #f3f4f6; color: var(--muted); }
+  .wf-node.st-failed  { border-color: var(--fail); }
+  .wf-node.st-skipped { opacity: .45; filter: saturate(.4); }
+  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(99,102,241,.35);} 50% { box-shadow: 0 0 0 10px rgba(99,102,241,0);} }
+
+  .wf-node .head { display: flex; align-items: center; gap: 9px; padding: 11px 12px 4px; }
+  .wf-node .head .icon {
+    width: 30px; height: 30px; border-radius: 9px; font-size: 15px; flex: none;
+    display: grid; place-items: center; background: var(--tint, #eef0ff);
+  }
+  .wf-node .head .title { font-size: 13px; font-weight: 700; color: var(--text); }
+  .wf-node .head .badge {
+    margin-left: auto; font-size: 10.5px; font-weight: 600; padding: 2px 9px; border-radius: 999px;
+    background: #f1f3f8; color: var(--muted); white-space: nowrap;
+  }
   .wf-node.st-running .badge { background: var(--accent-soft); color: var(--accent); }
-  .wf-node.st-success .badge { background: #dcfce7; color: var(--ok); }
-  .wf-node.st-failed .badge { background: #fee2e2; color: var(--fail); }
-  .wf-node .desc { padding: 0 12px 8px; font-size: 11px; color: var(--muted); line-height: 1.5; }
+  .wf-node.st-success .badge { background: var(--ok-soft); color: #047857; }
+  .wf-node.st-failed  .badge { background: var(--fail-soft); color: #b91c1c; }
+  .wf-node .desc { padding: 2px 12px 10px 51px; font-size: 11px; color: var(--muted); line-height: 1.55; }
+
   .wf-node .logs {
-    display: none; margin: 0 8px 8px; max-height: 130px; overflow-y: auto;
-    background: #0f172a; color: #a5f3a5; border-radius: 8px;
-    font: 10.5px/1.5 Consolas, monospace; padding: 6px 8px; white-space: pre-wrap; word-break: break-all;
+    display: none; margin: 0 9px 10px; max-height: 132px; overflow-y: auto;
+    background: #0b1120; color: #86efac; border-radius: 9px;
+    border: 1px solid rgba(99,102,241,.2);
+    font: 10.5px/1.6 Consolas, "Cascadia Mono", monospace; padding: 7px 9px;
+    white-space: pre-wrap; word-break: break-all;
   }
+  .wf-node .logs::-webkit-scrollbar { width: 6px; }
+  .wf-node .logs::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
   .wf-node .logs.show { display: block; }
+
   .dot-in, .dot-out {
-    position: absolute; top: 20px; width: 12px; height: 12px; border-radius: 50%;
-    background: var(--card); border: 2.5px solid var(--accent); cursor: crosshair; z-index: 2;
+    position: absolute; top: 25px; width: 13px; height: 13px; border-radius: 50%;
+    background: #fff; border: 2.5px solid var(--accent); cursor: crosshair; z-index: 2;
+    box-shadow: 0 0 0 3px rgba(99,102,241,.12); transition: transform .12s;
   }
-  .dot-in { left: -7px; }
-  .dot-out { right: -7px; }
-  .dot-in:hover, .dot-out:hover { transform: scale(1.3); }
+  .dot-in { left: -7.5px; }
+  .dot-out { right: -7.5px; }
+  .dot-in:hover, .dot-out:hover { transform: scale(1.35); box-shadow: 0 0 0 5px rgba(99,102,241,.2); }
 
   /* ---------- 参数面板 ---------- */
   #panel {
-    position: absolute; top: 52px; right: 0; bottom: 28px; width: 300px;
-    background: var(--card); border-left: 1px solid var(--border); padding: 16px; overflow-y: auto;
+    position: absolute; top: var(--header-h); right: 0; bottom: var(--footer-h); width: var(--panel-w);
+    background: var(--panel); border-left: 1px solid rgba(148,163,184,.18);
+    padding: 18px 16px; overflow-y: auto; color: #dbe2f2;
   }
-  #panel h2 { font-size: 14px; margin-bottom: 4px; }
-  #panel .desc { font-size: 12px; color: var(--muted); margin-bottom: 14px; line-height: 1.6; }
-  #panel .field { margin-bottom: 12px; }
-  #panel label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  #panel::-webkit-scrollbar { width: 6px; }
+  #panel::-webkit-scrollbar-thumb { background: rgba(148,163,184,.3); border-radius: 3px; }
+  #panel h2 { font-size: 15px; color: #fff; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+  #panel h2 .p-icon {
+    width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; font-size: 14px;
+    background: rgba(99,102,241,.2);
+  }
+  #panel .desc { font-size: 12px; color: #94a3c0; margin-bottom: 16px; line-height: 1.65;
+    padding-bottom: 12px; border-bottom: 1px dashed rgba(148,163,184,.2); }
+  #panel .field { margin-bottom: 13px; }
+  #panel label { display: block; font-size: 11.5px; color: #94a3c0; margin-bottom: 5px; font-weight: 500; }
   #panel input {
-    width: 100%; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px;
-    font-size: 13px; outline: none;
+    width: 100%; padding: 8px 11px; border: 1px solid rgba(148,163,184,.28); border-radius: 9px;
+    font-size: 13px; outline: none; color: #fff; background: rgba(11,16,32,.6);
+    transition: border-color .15s, box-shadow .15s;
   }
-  #panel input:focus { border-color: var(--accent); }
-  #panel .empty { color: var(--muted); font-size: 13px; text-align: center; margin-top: 60px; line-height: 2; }
-  #panel .actions { margin-top: 18px; display: flex; flex-direction: column; gap: 8px; }
+  #panel input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(99,102,241,.22); }
+  #panel .empty { color: #7d8db4; font-size: 12.5px; text-align: center; margin-top: 70px; line-height: 2.2; }
+  #panel .empty .big { font-size: 30px; display: block; margin-bottom: 6px; opacity: .7; }
+  #panel .actions { margin-top: 20px; display: flex; flex-direction: column; gap: 8px; }
+  #panel .actions button { padding: 9px 16px; border-radius: 10px; }
+  #panel .actions .ghost-danger { border-color: rgba(239,68,68,.4); color: #fca5a5; background: rgba(239,68,68,.08); }
+  #panel .actions .ghost-danger:hover { border-color: var(--fail); color: #fff; background: rgba(239,68,68,.2); }
 
   /* ---------- 底部状态栏 ---------- */
   footer {
-    position: absolute; left: 0; right: 0; bottom: 0; height: 28px;
-    background: var(--card); border-top: 1px solid var(--border);
-    display: flex; align-items: center; padding: 0 16px; font-size: 12px; color: var(--muted); gap: 14px;
+    position: absolute; left: 0; right: 0; bottom: 0; height: var(--footer-h);
+    background: var(--panel); border-top: 1px solid rgba(148,163,184,.18);
+    display: flex; align-items: center; padding: 0 16px; font-size: 12px; color: #94a3c0; gap: 14px;
   }
-  footer .legend span::before { content: "●"; margin: 0 4px 0 10px; }
-  .lg-idle::before { color: #d1d5db; } .lg-run::before { color: var(--run); }
+  #status-text { font-weight: 500; }
+  footer .progress {
+    width: 200px; height: 5px; border-radius: 999px; background: rgba(148,163,184,.18); overflow: hidden;
+  }
+  footer .progress > div {
+    height: 100%; width: 0%; border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    transition: width .4s ease;
+  }
+  footer .legend span::before { content: "●"; margin: 0 4px 0 12px; font-size: 9px; }
+  .lg-idle::before { color: #64748b; } .lg-run::before { color: var(--run); }
   .lg-ok::before { color: var(--ok); } .lg-fail::before { color: var(--fail); } .lg-skip::before { color: var(--skip); }
 </style>
 </head>
 <body>
 
 <header>
-  <h1>LLM 流水线编排<small>训练 → 导出 GGUF → 量化 → 部署</small></h1>
+  <div class="brand">
+    <div class="logo">⚙</div>
+    <h1>LLM 流水线编排<small>训练 → 导出 GGUF → 量化 → 部署</small></h1>
+  </div>
   <div class="spacer"></div>
   <span id="conn"><span class="dot"></span>未连接</span>
   <button id="btn-run" class="primary">▶ 运行全部</button>
   <button id="btn-stop" disabled>■ 停止</button>
-  <button id="btn-reset">↺ 恢复默认布局</button>
+  <button id="btn-reset">↺ 默认布局</button>
 </header>
 
 <div id="stage">
@@ -143,12 +243,19 @@
     <svg id="edges"></svg>
     <div id="nodes"></div>
   </div>
+  <div id="canvas-tools">
+    <button id="zoom-in" title="放大">+</button>
+    <div id="zoom-label">100%</div>
+    <button id="zoom-out" title="缩小">−</button>
+    <button id="fit-view" title="适配视图">⛶</button>
+  </div>
 </div>
 
-<div id="panel"><div class="empty">点击节点查看 / 编辑参数<br>拖拽节点右侧圆点连接到下一节点<br>拖拽空白处平移 · 滚轮缩放</div></div>
+<div id="panel"><div class="empty"><span class="big">◇</span>点击节点查看 / 编辑参数<br>拖拽节点右侧圆点连接到下一节点<br>拖拽空白处平移 · 滚轮缩放</div></div>
 
 <footer>
   <span id="status-text">就绪</span>
+  <div class="progress"><div id="progress-bar"></div></div>
   <span class="spacer"></span>
   <span class="legend">
     <span class="lg-idle">待运行</span><span class="lg-run">运行中</span>
@@ -180,12 +287,27 @@ const nodesEl = document.getElementById("nodes");
 const edgesEl = document.getElementById("edges");
 const panel = document.getElementById("panel");
 const statusText = document.getElementById("status-text");
+const progressBar = document.getElementById("progress-bar");
 const btnRun = document.getElementById("btn-run");
 const btnStop = document.getElementById("btn-stop");
 const btnReset = document.getElementById("btn-reset");
 const connEl = document.getElementById("conn");
+const zoomLabel = document.getElementById("zoom-label");
 
-const NODE_W = 220, ANCHOR_Y = 24;
+const NODE_W = 224, ANCHOR_Y = 26;
+
+// 节点主题色 (按节点 id 顺序循环): 图标底色
+const TINTS = [
+  ["#e0e7ff", "#4338ca"], ["#d1fae5", "#047857"], ["#fef3c7", "#b45309"],
+  ["#fce7f3", "#be185d"], ["#cffafe", "#0e7490"], ["#ede9fe", "#6d28d9"],
+  ["#ffedd5", "#c2410c"], ["#dcfce7", "#15803d"],
+];
+function tintOf(id, idx) {
+  // 优先按语义匹配, 否则按顺序循环
+  const map = { train: 0, sft: 4, export: 1, quantize: 2, eval: 3, spec: 5, serve: 6, smoke: 7 };
+  for (const k in map) if (id.includes(k)) return TINTS[map[k]];
+  return TINTS[idx % TINTS.length];
+}
 
 // ---------- localStorage ----------
 const LS = { pos: "wf_pos_v1", edge: "wf_edges_v1", param: "wf_params_v1", view: "wf_view_v1" };
@@ -209,13 +331,14 @@ async function init() {
   const res = await fetch(API.workflow);
   def = await res.json();
   if (savedEdges && Array.isArray(savedEdges) && savedEdges.length) def.edges = savedEdges;
-  def.nodes.forEach(n => {
+  def.nodes.forEach((n, i) => {
     if (!positions[n.id]) positions[n.id] = { x: n.x, y: n.y };
     n.params.forEach(p => {
       const k = n.id + "." + p.key;
       if (!(k in params)) params[k] = p.default;
     });
     statuses[n.id] = "idle";
+    n._tint = tintOf(n.id, i);
   });
   buildNodes();
   renderEdges();
@@ -242,10 +365,11 @@ function buildNodes() {
     el.className = "wf-node" + (n.optional ? " optional" : "");
     el.id = "node-" + n.id;
     el.innerHTML =
-      '<div class="head"><span class="icon">' + n.icon + '</span>' +
-      '<span class="title">' + n.label + '</span>' +
-      (n.optional ? '<span class="tag-opt">可选</span>' : '') +
-      '<span class="badge">待运行</span></div>' +
+      '<div class="head">' +
+        '<span class="icon" style="background:' + n._tint[0] + '">' + n.icon + '</span>' +
+        '<span class="title">' + n.label + '</span>' +
+        (n.optional ? '<span class="tag-opt">可选</span>' : '') +
+        '<span class="badge">待运行</span></div>' +
       '<div class="desc">' + n.desc + '</div>' +
       '<div class="logs"></div>' +
       '<div class="dot-in" data-node="' + n.id + '"></div>' +
@@ -269,7 +393,7 @@ function setNodeStatus(id, st) {
   statuses[id] = st;
   const el = document.getElementById("node-" + id);
   if (!el) return;
-  el.className = "wf-node selected" === el.className ? el.className : "wf-node";
+  el.className = "wf-node" + (def.nodes.find(x => x.id === id).optional ? " optional" : "");
   if (selected === id) el.classList.add("selected");
   if (st !== "idle") el.classList.add("st-" + st);
   const badge = el.querySelector(".badge");
@@ -306,12 +430,17 @@ function edgePath(a, b) {
   return `M ${a.x} ${a.y} C ${a.x + dx} ${a.y}, ${b.x - dx} ${b.y}, ${b.x} ${b.y}`;
 }
 function renderEdges() {
-  let html = "";
+  let html =
+    '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">' +
+    '<path d="M 0 1 L 10 5 L 0 9 z" fill="rgba(148,163,184,.7)"/></marker>' +
+    '<marker id="arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">' +
+    '<path d="M 0 1 L 10 5 L 0 9 z" fill="#10b981"/></marker></defs>';
   def.edges.forEach(e => {
-    let cls = "";
-    if (statuses[e.to] === "running") cls = statuses[e.from] === "success" ? "active" : "";
-    else if (statuses[e.to] === "success" || statuses[e.to] === "failed") cls = "done";
-    html += `<path class="${cls}" d="${edgePath(anchorOut(e.from), anchorIn(e.to))}"/>`;
+    let cls = "", mark = "";
+    if (statuses[e.to] === "running") { cls = statuses[e.from] === "success" ? "active" : ""; }
+    else if (statuses[e.to] === "success" || statuses[e.to] === "failed") { cls = "done"; mark = ' marker-end="url(#arrow-ok)"'; }
+    else mark = ' marker-end="url(#arrow)"';
+    html += `<path class="${cls}" d="${edgePath(anchorOut(e.from), anchorIn(e.to))}"${mark}/>`;
   });
   if (tempEdge) html += `<path class="temp" d="${tempEdge}"/>`;
   edgesEl.innerHTML = html;
@@ -403,7 +532,40 @@ stage.addEventListener("wheel", e => {
 }, { passive: false });
 function applyView() {
   viewport.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale})`;
+  // 网格背景跟随视口移动, 缩放同步网格间距
+  stage.style.backgroundPosition = `${view.x}px ${view.y}px`;
+  stage.style.backgroundSize = `${22 * view.scale}px ${22 * view.scale}px`;
+  zoomLabel.textContent = Math.round(view.scale * 100) + "%";
 }
+
+// ---------- 缩放工具条 ----------
+function zoomBy(factor) {
+  const rect = stage.getBoundingClientRect();
+  const mx = rect.width / 2, my = rect.height / 2;
+  const ns = Math.min(2, Math.max(0.4, view.scale * factor));
+  view.x = mx - (mx - view.x) * (ns / view.scale);
+  view.y = my - (my - view.y) * (ns / view.scale);
+  view.scale = ns;
+  applyView(); saveLS();
+}
+document.getElementById("zoom-in").addEventListener("click", () => zoomBy(1.2));
+document.getElementById("zoom-out").addEventListener("click", () => zoomBy(1 / 1.2));
+document.getElementById("fit-view").addEventListener("click", () => {
+  const ids = Object.keys(positions);
+  if (!ids.length) return;
+  let minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
+  ids.forEach(id => {
+    minX = Math.min(minX, positions[id].x); minY = Math.min(minY, positions[id].y);
+    maxX = Math.max(maxX, positions[id].x + NODE_W + 60); maxY = Math.max(maxY, positions[id].y + 160);
+  });
+  const rect = stage.getBoundingClientRect();
+  const pad = 40;
+  const scale = Math.min(2, Math.max(0.4, Math.min(rect.width / (maxX - minX + pad), rect.height / (maxY - minY + pad))));
+  view.scale = scale;
+  view.x = (rect.width - (maxX - minX) * scale) / 2 - minX * scale;
+  view.y = (rect.height - (maxY - minY) * scale) / 2 - minY * scale;
+  applyView(); saveLS();
+});
 
 // ---------- 参数面板 ----------
 function selectNode(id) {
@@ -412,7 +574,7 @@ function selectNode(id) {
   if (!id) { renderPanelEmpty(); renderEdges(); return; }
   document.getElementById("node-" + id).classList.add("selected");
   const n = def.nodes.find(x => x.id === id);
-  let html = `<h2>${n.icon} ${n.label}</h2><div class="desc">${n.desc}</div>`;
+  let html = `<h2><span class="p-icon" style="background:${n._tint[0]}">${n.icon}</span>${n.label}</h2><div class="desc">${n.desc}</div>`;
   n.params.forEach(p => {
     const k = n.id + "." + p.key;
     html += `<div class="field"><label>${p.label}</label>` +
@@ -420,7 +582,7 @@ function selectNode(id) {
   });
   html += `<div class="actions">` +
     `<button class="primary" onclick="runOnly('${n.id}')">▶ 仅运行此节点</button>` +
-    `<button onclick="deleteEdgesOf('${n.id}')">✂ 删除相关连线</button></div>`;
+    `<button class="ghost-danger" onclick="deleteEdgesOf('${n.id}')">✂ 删除相关连线</button></div>`;
   panel.innerHTML = html;
   panel.querySelectorAll("input").forEach(inp => {
     inp.addEventListener("change", () => {
@@ -430,7 +592,7 @@ function selectNode(id) {
   });
 }
 function renderPanelEmpty() {
-  panel.innerHTML = '<div class="empty">点击节点查看 / 编辑参数<br>拖拽节点右侧圆点连接到下一节点<br>拖拽空白处平移 · 滚轮缩放</div>';
+  panel.innerHTML = '<div class="empty"><span class="big">◇</span>点击节点查看 / 编辑参数<br>拖拽节点右侧圆点连接到下一节点<br>拖拽空白处平移 · 滚轮缩放</div>';
 }
 function deleteEdgesOf(id) {
   def.edges = def.edges.filter(e => e.from !== id && e.to !== id);
@@ -447,12 +609,13 @@ async function runWorkflow(only) {
   btnRun.disabled = true;
   btnStop.disabled = false;
   statusText.textContent = only ? `运行节点: ${only.join(", ")}` : "运行全部节点…";
+  progressBar.style.width = "0%";
 
   // 重置状态
   def.nodes.forEach(n => {
     statuses[n.id] = "idle";
     const el = document.getElementById("node-" + n.id);
-    el.className = "wf-node";
+    el.className = "wf-node" + (n.optional ? " optional" : "");
     const box = nodeLogs(n.id);
     if (box) { box.textContent = ""; box.classList.remove("show"); }
   });
@@ -499,12 +662,14 @@ function handleEvent(ev) {
       if (ev.status === "success") doneCount++;
       const total = def.nodes.length;
       statusText.textContent = `进度 ${doneCount}/${total} — ${ev.node} ${ev.status === "running" ? "运行中" : "完成"}`;
+      progressBar.style.width = Math.min(100, (doneCount / total) * 100) + "%";
     }
   } else if (ev.event === "log") {
     appendLog(ev.node, ev.line);
   } else if (ev.event === "done") {
     doneCount = 0;
     statusText.textContent = ev.ok ? "✓ 工作流执行完成" : "✗ 工作流失败 (详情见节点日志)";
+    if (ev.ok) progressBar.style.width = "100%";
   }
 }
 

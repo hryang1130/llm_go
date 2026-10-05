@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import (  # noqa: E402
     ROOT, cfg_get, find_binary, http_json, http_text, load_config, markdown_table,
-    resolve_path, size_mb, try_find_binary, write_report,
+    resolve_path, size_mb, supports_flag, try_find_binary, write_report,
 )
 from eval import PROMPT, Server  # noqa: E402  复用服务管理与提示词
 
@@ -110,12 +110,13 @@ def check_env(args, cfg) -> int:
 
 
 def measure(binary: Path, target: Path, ctx: int, max_tokens: int, rounds: int,
-            draft: Path | None = None, extra: list[str] | None = None) -> dict:
+            draft: Path | None = None, extra: list[str] | None = None,
+            tag: str = "") -> dict:
     """跑一组测量; draft 不为空时启用投机解码并从 /metrics 抓接受率。"""
     flags = list(extra or [])
     if draft:
         flags += ["--model-draft", str(draft)]
-    with Server(binary, target, ctx, flags) as srv:
+    with Server(binary, target, ctx, flags, tag=tag) as srv:
         dec, ttft, accept = [], [], None
         for i in range(rounds):
             res = None
@@ -140,17 +141,29 @@ def measure(binary: Path, target: Path, ctx: int, max_tokens: int, rounds: int,
     }
 
 
+def _metric(text: str, name: str) -> float | None:
+    """从 Prometheus 文本里取某个计数器的值 (跳过 HELP/TYPE 行)。"""
+    m = re.search(rf"{re.escape(name)}\s+([0-9.eE+\-]+)", text)
+    return float(m.group(1)) if m else None
+
+
 def accept_rate(srv: Server) -> float | None:
-    """从 llama-server 的 /metrics 里抓 draft 接受率 (新版才有该指标)。"""
+    """从 llama-server 的 /metrics 里抓 draft 接受率。
+
+    指标名在 llama.cpp 版本间变过, 这里两套都试:
+      * 新版: llamacpp:spec_decode_num_accepted_tokens_total / ..._num_draft_tokens_total
+      * 旧版: draft_n_accepted_total / draft_n_evaluated_total
+    """
     text = http_text(f"{srv.url}/metrics")
     if not text:
         return None
-    acc = re.search(r"draft_n_accepted_total\s+([0-9.e+]+)", text)
-    evl = re.search(r"draft_n_evaluated_total\s+([0-9.e+]+)", text)
-    if acc and evl:
-        a, e = float(acc.group(1)), float(evl.group(1))
-        if e > 0:
-            return a / e
+    for acc_name, tot_name in (
+        ("spec_decode_num_accepted_tokens_total", "spec_decode_num_draft_tokens_total"),
+        ("draft_n_accepted_total", "draft_n_evaluated_total"),
+    ):
+        acc, tot = _metric(text, acc_name), _metric(text, tot_name)
+        if acc is not None and tot:
+            return acc / tot
     return None
 
 
@@ -186,15 +199,27 @@ def main():
     print(f"[spec] draft : {draft.name} ({size_mb(draft):.1f} MB)")
     print(f"[spec] draft-max={draft_max} draft-min={draft_min} p-min={p_min}, {rounds} 轮取中位数")
 
+    # llama.cpp b6xxx 起把 --draft-max / --draft-min 改名为 --spec-draft-n-max / --spec-draft-n-min,
+    # 这里按二进制实际支持的参数名组装, 兼容新旧版本 (探测失败时退回旧名)
+    n_max_flag = ("--spec-draft-n-max" if supports_flag(binary, "--spec-draft-n-max")
+                  else "--draft-max")
+    n_min_flag = ("--spec-draft-n-min" if supports_flag(binary, "--spec-draft-n-min")
+                  else "--draft-min")
+    p_min_flag = ("--spec-draft-p-min" if supports_flag(binary, "--spec-draft-p-min")
+                  else "--draft-p-min")
+    if n_max_flag == "--draft-max":
+        print("[spec] 该 llama-server 使用旧版投机解码参数名 (--draft-max/--draft-min)")
+
     print("\n[spec] 基线 (target 单独推理)")
-    base = measure(binary, target, ctx, max_tokens, rounds)
+    base = measure(binary, target, ctx, max_tokens, rounds, tag="base")
     print(f"    -> decode {base['decode_tok_s']} tok/s, TTFT {base['ttft_ms']} ms")
 
     print("\n[spec] 投机解码 (target + draft)")
-    extra = ["--draft-max", str(draft_max), "--draft-min", str(draft_min)]
+    extra = [n_max_flag, str(draft_max), n_min_flag, str(draft_min)]
     if p_min is not None:
-        extra += ["--draft-p-min", str(p_min)]
-    spec = measure(binary, target, ctx, max_tokens, rounds, draft=draft, extra=extra)
+        extra += [p_min_flag, str(p_min)]
+    spec = measure(binary, target, ctx, max_tokens, rounds,
+                   draft=draft, extra=extra, tag="spec")
     print(f"    -> decode {spec['decode_tok_s']} tok/s, TTFT {spec['ttft_ms']} ms, "
           f"接受率 {spec['accept_rate']:.1%}" if spec["accept_rate"]
           else f"    -> decode {spec['decode_tok_s']} tok/s")
@@ -215,7 +240,8 @@ def main():
     body = "\n".join([
         f"target: `{target.name}` ({size_mb(target):.1f} MB) · "
         f"draft: `{draft.name}` ({size_mb(draft):.1f} MB)",
-        f"参数: draft-max={draft_max}, draft-min={draft_min}, p-min={p_min}, "
+        f"参数: {n_max_flag}={draft_max}, {n_min_flag}={draft_min}, "
+        f"{p_min_flag}={p_min}, "
         f"上下文 {ctx}, 每组 {len(DRAFT_PROMPTS)} 个 prompt × {rounds} 轮取中位数, 温度 0",
         "",
         "## 结果",

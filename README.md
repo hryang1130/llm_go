@@ -325,4 +325,8 @@ docker compose run pipeline   # 一键训练+导出 (需挂载 llama.cpp 仓库,
   - Trainer 需要 `accelerate`（已写入 requirements.txt）
   - llama-quantize 在输出重定向到管道时可能报 iostream 错误并返回非零，但产物已生成——`export_gguf.py` 已按产物判断成败
   - 新版 llama-server 对非流式 `/completion` 输出做严格 UTF-8 校验，小模型偶发的坏字节会 500；流式请求不受影响（工作流测试节点已用流式）
+  - **`--chunks 0` 陷阱**: 部分 llama.cpp 版本会把它当真、只跑 0 个 chunk——`llama-perplexity` 直接报错、`llama-imatrix` 产出 448 字节空矩阵。`eval.py` / `quantize_sweep.py` 已不再传该参数
+  - **投机解码参数改名**: 新版 llama.cpp 已移除 `--draft-max/--draft-min/--draft-p-min`，改为 `--spec-draft-n-max/--spec-draft-n-min/--spec-draft-p-min`。`spec_decode.py` 用 `--help` 探测自动兼容两代
+  - **投机解码指标改名**: 新版 `/metrics` 计数器为 `llamacpp:spec_decode_num_accepted_tokens_total` / `_num_draft_tokens_total`（旧版为 `draft_n_accepted_total` / `draft_n_evaluated_total`），两套均已适配
+  - **语料长度要求**: PPL / imatrix 语料 token 数需 ≥ 2×上下文长度，否则报错。脚本会在语料不足时自动下调上下文重试；若替换 `data/eval.txt`，请保证它足够长（建议 ≥ 4KB 文本）
 - **上 LoRA 微调**: 把 train.py 换成 peft 的 LoRA 训练 HF 现成模型（如 Qwen3-0.6B），后续导出/量化/部署流程完全复用

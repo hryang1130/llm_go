@@ -110,8 +110,10 @@ def main():
     w.add_tokenizer_pre("gpt-2")                       # 与 train.py 预分词规则一致
     w.add_array("tokenizer.ggml.tokens", tokens)
     w.add_array("tokenizer.ggml.scores", [0.0] * n_vocab)
+    # token_type: 1=NORMAL, 3=CONTROL。特殊 token 必须标成 CONTROL,
+    # 否则 llama.cpp 不把它们当作 EOG, 会告警 "special_eos_id is not in special_eog_ids"
     w.add_array("tokenizer.ggml.token_type",
-                [2 if i in special_ids else 1 for i in range(n_vocab)])
+                [3 if i in special_ids else 1 for i in range(n_vocab)])
     # gpt2 型 BPE 必需: 合并规则列表 ["a b", ...] 或 [[a, b], ...]
     merges = [" ".join(m) if isinstance(m, list) else m for m in tj["model"]["merges"]]
     w.add_array("tokenizer.ggml.merges", merges)

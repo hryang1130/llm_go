@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import time
 from pathlib import Path
@@ -51,7 +52,7 @@ def parse_args():
     p.add_argument("--schemes", default=None,
                    help=f"逗号分隔的量化方案, 默认 {','.join(DEFAULT_SCHEMES)}")
     p.add_argument("--imatrix", nargs="?", const="auto", default=None,
-                   help="'auto' 生成校准矩阵, 或指定已有 .dat 文件; 不传则跳过")
+                   help="'auto' 生成校准矩阵, 或指定已有 .dat 文件; none 表示关闭校准")
     p.add_argument("--calibration", default=None, help="校准文本 (默认 config quantize.imatrix.calibration)")
     p.add_argument("--ctx-size", type=int, default=512, help="imatrix 统计上下文长度")
     p.add_argument("--imatrix-strict", action="store_true",
@@ -81,8 +82,30 @@ def check_env(args, cfg) -> int:
     return 0 if ok else 1
 
 
+def _imatrix_token_count(log_text: str) -> int | None:
+    """从 llama-imatrix 日志里抓「语料只有 N 个 token」的 N (用于自动下调上下文)。"""
+    m = re.search(r"tokenizes to only (\d+) tokens", log_text)
+    return int(m.group(1)) if m else None
+
+
+def _run_imatrix(imatrix_bin: Path, f16: Path, calib: Path, out_path: Path,
+                 ctx: int, log: Path) -> bool:
+    """执行一次 imatrix 校准, 返回「本次」是否成功产出非空矩阵。
+
+    注意: 不传 `--chunks 0` —— 在部分 llama.cpp 版本里它会被解释成真的跑 0 个 chunk,
+    从而只写出一个几百字节的空矩阵; 留空则由工具自己决定跑满全部数据。
+    同时用修改时间判断产物是否由本次运行产生, 避免把上一次的旧文件误判为成功。
+    """
+    before = out_path.stat().st_mtime_ns if out_path.exists() else None
+    run([imatrix_bin, "-m", f16, "-f", calib, "-o", out_path, "-c", str(ctx)],
+        log_path=log, check=False)
+    if not out_path.exists() or out_path.stat().st_size == 0:
+        return False
+    return before is None or out_path.stat().st_mtime_ns > before
+
+
 def build_imatrix(args, cfg, imatrix_bin, f16_path: Path) -> Path | None:
-    """生成重要性矩阵; 失败时视 --imatrix-strict 决定是否退出。"""
+    """生成重要性矩阵; 语料过小时自动下调上下文重试一次, 仍失败则按需降级。"""
     if args.imatrix and args.imatrix != "auto":
         path = Path(args.imatrix)
         if not path.exists():
@@ -102,23 +125,31 @@ def build_imatrix(args, cfg, imatrix_bin, f16_path: Path) -> Path | None:
     out_path = resolve_path(cfg_get(cfg, "quantize.imatrix.output", "models/imatrix.dat"))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     log = ROOT / "out" / "imatrix.log"
-    print(f"[imatrix] 校准语料 {calib} ({size_mb(calib):.1f} MB), 上下文 {args.ctx_size}")
-    try:
-        run([imatrix_bin, "-m", f16_path, "-f", calib,
-             "-o", out_path, "-c", str(args.ctx_size),
-             "--chunks", "0"], log_path=log)
-    except Exception as exc:                     # 小语料/参数不兼容等
-        msg = f"[imatrix] 生成失败: {exc}"
-        print(read_log(log, tail=8))
-        if args.imatrix_strict:
-            sys.exit(msg)
-        print(msg + " -> 降级为普通量化")
-        return None
-    if not out_path.exists():
-        print("[imatrix] 未生成校准矩阵 -> 降级为普通量化")
-        return None
-    print(f"[imatrix] 已生成 {out_path} ({size_mb(out_path):.2f} MB)")
-    return out_path
+
+    # llama-imatrix 要求语料至少 2×ctx 个 token; 样例语料通常偏小,
+    # 因此首次失败后自动按实际 token 数下调上下文再试一次。
+    ctx = args.ctx_size
+    for attempt in range(2):
+        print(f"[imatrix] 校准语料 {calib} ({size_mb(calib):.1f} MB), 上下文 {ctx}")
+        if _run_imatrix(imatrix_bin, f16_path, calib, out_path, ctx, log):
+            print(f"[imatrix] 已生成 {out_path} ({size_mb(out_path):.2f} MB)")
+            return out_path
+        tokens = _imatrix_token_count(read_log(log))
+        # llama-imatrix 要求 token 数 >= 2×ctx; 取不超过 tokens/2 的最大 2 的幂留出余量
+        adapted = max(64, 1 << ((tokens // 2).bit_length() - 1)) if tokens else 0
+        if attempt == 0 and 0 < adapted < ctx:
+            print(f"[imatrix] 语料仅 {tokens} tokens, 不足以支持上下文 {ctx}; "
+                  f"自动下调到 {adapted} 重试")
+            ctx = adapted
+            continue
+        break
+
+    print(read_log(log, tail=6))
+    msg = "[imatrix] 生成失败 (语料过小或参数不兼容)"
+    if args.imatrix_strict:
+        sys.exit(msg)
+    print(msg + " -> 降级为普通量化")
+    return None
 
 
 def quantize_one(quantizer: Path, f16: Path, out_path: Path, scheme: str,
@@ -172,8 +203,13 @@ def main():
     print(f"[sweep] 输入 F16: {f16.name} ({size_mb(f16):.1f} MB)")
     print(f"[sweep] 方案: {', '.join(schemes)}")
 
+    # --imatrix none/off/false 表示关闭校准, 其余值 (auto 或 .dat 路径) 表示启用
+    imat_opt = (args.imatrix or "").strip()
     imatrix = None
-    if args.imatrix:
+    if imat_opt and imat_opt.lower() in ("none", "off", "false", "0"):
+        print("[imatrix] 已通过 --imatrix none 关闭校准")
+        imat_opt = ""
+    if imat_opt:
         imatrix_bin = try_find_binary("imatrix", args.imatrix_bin, args.llama_cpp)
         if imatrix_bin:
             imatrix = build_imatrix(args, cfg, imatrix_bin, f16)
@@ -184,7 +220,8 @@ def main():
 
     results = []
     for scheme in schemes:
-        out_path = f16.with_name(f"{f16.stem.replace('-f16', '')}-{scheme}.gguf")
+        # 文件名统一用小写方案名 (与 export_gguf.py / config 里的 paths.gguf_q4 保持一致)
+        out_path = f16.with_name(f"{f16.stem.replace('-f16', '')}-{scheme.lower()}.gguf")
         results.append(quantize_one(quantizer, f16, out_path, scheme, imatrix, args.force))
 
     f16_mb = size_mb(f16)

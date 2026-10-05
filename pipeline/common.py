@@ -150,6 +150,21 @@ def binary_report(explicit: str | Path | None = None) -> dict[str, str | None]:
     return out
 
 
+def supports_flag(binary: str | Path, flag: str, timeout: int = 30) -> bool:
+    """探测二进制是否认识某个命令行参数 (用于兼容不同版本的 llama.cpp)。
+
+    例: llama.cpp b6xxx 之后把 `--draft-max` 改名为 `--spec-draft-n-max`,
+    这里通过读 `--help` 输出判断该用哪一个, 避免硬编码导致的启动失败。
+    """
+    try:
+        proc = subprocess.run([str(binary), "--help"], capture_output=True,
+                              text=True, encoding="utf-8", errors="replace",
+                              timeout=timeout)
+    except Exception:
+        return False
+    return flag in ((proc.stdout or "") + (proc.stderr or ""))
+
+
 # --------------------------------------------------------------------------- #
 # 子进程
 # --------------------------------------------------------------------------- #

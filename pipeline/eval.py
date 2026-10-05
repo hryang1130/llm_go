@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import statistics
 import subprocess
 import sys
@@ -37,8 +38,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import (  # noqa: E402
     ROOT, cfg_get, find_binary, free_port, http_json, load_config, markdown_table,
-    process_memory_mb, resolve_path, run, size_mb, try_find_binary, wait_for_http,
-    write_report,
+    process_memory_mb, read_log, resolve_path, run, size_mb, try_find_binary,
+    wait_for_http, write_report,
 )
 
 PROMPT = "人工智能是计算机科学的一个分支，"
@@ -123,27 +124,57 @@ def hf_ppl(hf_dir: Path, corpus: Path, block_size: int) -> float | None:
     return math.exp(nll_total / max(n_tok, 1))
 
 
-def server_ppl(ppl_bin: Path, model: Path, corpus: Path, ctx: int) -> float | None:
-    """用 llama-perplexity 计算困惑度。"""
-    log = ROOT / "out" / f"ppl-{model.stem}.log"
-    try:
-        run([ppl_bin, "-m", model, "-f", corpus, "-c", str(ctx), "--chunks", "0"],
-            log_path=log, check=False)
-    except Exception:
+def ppl_adapted_ctx(log_text: str) -> int | None:
+    """llama-perplexity 报「语料只有 N 个 token」时, 给出它实际能跑的上下文。
+
+    该工具要求 token 数 >= 2×ctx, 样例语料往往偏小, 因此取不超过 N/2 的最大 2 的幂。
+    """
+    m = re.search(r"tokenizes to only (\d+) tokens", log_text)
+    if not m:
         return None
+    n = int(m.group(1))
+    return max(32, 1 << ((n // 2).bit_length() - 1))
+
+
+def server_ppl(ppl_bin: Path, model: Path, corpus: Path, ctx: int) -> float | None:
+    """用 llama-perplexity 计算困惑度; 语料偏小时自动下调上下文重试一次。"""
     from common import parse_ppl, read_log
-    return parse_ppl(read_log(log))
+    log = ROOT / "out" / f"ppl-{model.stem}.log"
+    for attempt in range(2):
+        try:
+            # 不传 --chunks 0: 部分 llama.cpp 版本会把它当真只跑 0 个 chunk 而直接报错
+            run([ppl_bin, "-m", model, "-f", corpus, "-c", str(ctx)],
+                log_path=log, check=False)
+        except Exception:
+            return None
+        ppl = parse_ppl(read_log(log))
+        if ppl is not None:
+            return ppl
+        text = read_log(log)
+        adapted = ppl_adapted_ctx(text)
+        if attempt == 0 and adapted and adapted < ctx:
+            print(f"    PPL: 语料过小, 上下文 {ctx} -> {adapted} 重试")
+            ctx = adapted
+            continue
+        reason = next((ln.strip() for ln in reversed(text.splitlines())
+                       if ln.strip().startswith("E ")), "未知原因")
+        print(f"    PPL: 未能计算 —— {reason}")
+        break
+    return None
 
 
 class Server:
     """llama-server 生命周期管理 (启动/探活/优雅退出)。"""
 
-    def __init__(self, binary: Path, model: Path, ctx: int, extra: list[str] | None = None):
+    def __init__(self, binary: Path, model: Path, ctx: int,
+                 extra: list[str] | None = None, tag: str = ""):
         self.binary, self.model, self.ctx = binary, model, ctx
         self.extra = extra or []
+        self.tag = tag
         self.port = free_port()
         self.proc: subprocess.Popen | None = None
-        self.log = ROOT / "out" / f"server-{model.stem}{'-kvq' if extra else ''}.log"
+        suffix = f"-{tag}" if tag else ""
+        self.log = ROOT / "out" / f"server-{model.stem}{suffix}.log"
 
     def __enter__(self):
         self.log.parent.mkdir(parents=True, exist_ok=True)
@@ -152,10 +183,27 @@ class Server:
         print("+", " ".join(cmd), flush=True)
         self.fh = open(self.log, "w", encoding="utf-8", errors="replace")
         self.proc = subprocess.Popen(cmd, stdout=self.fh, stderr=subprocess.STDOUT)
-        if not wait_for_http(f"http://127.0.0.1:{self.port}/health", timeout=120):
+        if not self._wait_ready():
+            log_tail = read_log(self.log, tail=10)
             self.__exit__(None, None, None)
-            raise RuntimeError(f"llama-server 启动失败, 详见 {self.log}")
+            raise RuntimeError(f"llama-server 启动失败, 详见 {self.log}\n{log_tail}")
         return self
+
+    def _wait_ready(self, timeout: float = 120.0) -> bool:
+        """等待 /health 就绪。
+
+        进程若提前退出 (参数不被识别 / 模型加载失败) 立即返回失败并打印日志,
+        避免为一个已经死掉的进程白等满整个超时。
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.proc.poll() is not None:        # 进程已退出
+                print(f"[server] 进程提前退出 (exit={self.proc.returncode})", flush=True)
+                return False
+            if wait_for_http(f"{self.url}/health", timeout=1.0):
+                return True
+            time.sleep(0.5)
+        return False
 
     @property
     def url(self) -> str:
@@ -188,9 +236,9 @@ class Server:
 
 
 def measure(args, server_bin: Path, model: Path, ctx: int, max_tokens: int,
-            rounds: int, extra: list[str] | None = None) -> dict:
+            rounds: int, extra: list[str] | None = None, tag: str = "") -> dict:
     """跑一组吞吐测量, 返回中位数指标。"""
-    with Server(server_bin, model, ctx, extra) as srv:
+    with Server(server_bin, model, ctx, extra, tag=tag) as srv:
         dec, pre, ttft, wall = [], [], [], []
         for i in range(rounds):
             r = srv.complete(max_tokens)
@@ -253,7 +301,8 @@ def main():
 
         if args.kv_quant:
             kv = ["--cache-type-k", "q8_0", "--cache-type-v", "q8_0"]
-            kv_res = measure(args, server_bin, m, ctx, max_tokens, rounds, extra=kv)
+            kv_res = measure(args, server_bin, m, ctx, max_tokens, rounds,
+                             extra=kv, tag="kvq")
             row["kv_q8"] = kv_res
             print(f"    -> KV q8_0: decode {kv_res['decode_tok_s']} tok/s, "
                   f"RSS {kv_res['server_rss_mb']} MB")
@@ -292,10 +341,22 @@ def main():
             f"{r['server_rss_mb']:.0f}" if r.get("server_rss_mb") else "—",
         ])
 
+    # PPL 全缺时给出可操作的原因提示 (最常见是语料 token 数不足)
+    ppl_note: list[str] = []
+    if results and all(not r.get("ppl") for r in results):
+        ppl_note = ["",
+                    "> ⚠ 本机未取到困惑度。最常见原因是评测语料太短: "
+                    "`llama-perplexity` 要求语料 token 数 ≥ 2×上下文长度 "
+                    "(默认上下文 "
+                    f"{ctx} → 至少 {2 * ctx} 个 token)。"
+                    f"当前用例语料 `{corpus.name}` 偏小; 脚本已尝试自动下调上下文, "
+                    "仍失败则请换用更长的留出语料 (把 `config.yaml` 的 `eval.corpus` 指向它)。"]
+
     body = "\n".join([
         f"测量条件: 上下文 {ctx}, 每轮生成 {max_tokens} tokens, {rounds} 轮取中位数; "
         f"PPL 语料 `{corpus.name}`; 解码温度 0。",
         f"基线: {Path(baseline['path']).name if baseline else '未匹配到 F16 (相对变化列留空)'}",
+        *ppl_note,
         "",
         "## 总表",
         "",

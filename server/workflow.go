@@ -44,6 +44,10 @@ type WFNode struct {
 	X      float64   `json:"x"`
 	Y      float64   `json:"y"`
 	Params []WFParam `json:"params"`
+	// Optional 节点默认不参与「运行全部」(一键全流程保持最短路径),
+	// 只在「仅运行此节点」或显式指定时执行 —— 用于 SFT、评测、投机解码等
+	// 需要额外模型的进阶阶段。
+	Optional bool `json:"optional,omitempty"`
 }
 
 type WFEdge struct {
@@ -103,6 +107,54 @@ func workflowDef() WFDef {
 				Params: []WFParam{
 					{Key: "prompt", Label: "测试 Prompt", Default: "人工智能"},
 					{Key: "n_predict", Label: "生成 Token 数", Default: "48"},
+				},
+			},
+
+			// ---------- 进阶阶段 (可选节点: 默认不参与「运行全部」, 单独点「运行此节点」) ----------
+			{
+				ID: "train_target", Label: "训练 target 模型", Icon: "🏗️", X: 60, Y: 440,
+				Desc: "训练第二档模型 (复用分词器, 与 draft 词表一致, 供投机解码使用)",
+				Optional: true,
+				Params: []WFParam{
+					{Key: "epochs", Label: "训练轮数", Default: "80"},
+				},
+			},
+			{
+				ID: "sft", Label: "指令微调 (LoRA)", Icon: "🎯", X: 320, Y: 440,
+				Desc: "在 base 模型上做 LoRA SFT, 产物可直接导出 GGUF",
+				Optional: true,
+				Params: []WFParam{
+					{Key: "epochs", Label: "训练轮数", Default: "3"},
+					{Key: "steps", Label: "步数上限(0=不限)", Default: "0"},
+				},
+			},
+			{
+				ID: "sweep", Label: "量化方案对比", Icon: "🗜️", X: 580, Y: 440,
+				Desc: "imatrix 校准 + Q8_0/Q4_K_M/Q4_K_S/IQ4_XS 体积对比",
+				Optional: true,
+				Params: []WFParam{
+					{Key: "schemes", Label: "方案(逗号分隔)", Default: "Q8_0,Q4_K_M,Q4_K_S,IQ4_XS"},
+					{Key: "imatrix", Label: "imatrix 校准(auto/none/路径)", Default: "auto"},
+				},
+			},
+			{
+				ID: "eval", Label: "评测基准", Icon: "📊", X: 840, Y: 440,
+				Desc: "PPL / 首 token 延迟 / 解码吞吐 / KV cache 量化对比",
+				Optional: true,
+				Params: []WFParam{
+					{Key: "rounds", Label: "测量轮数", Default: "3"},
+					{Key: "max_tokens", Label: "每次生成 Token", Default: "128"},
+					{Key: "kv_quant", Label: "KV cache 量化(1/0)", Default: "1"},
+				},
+			},
+			{
+				ID: "spec", Label: "投机解码实验", Icon: "⚡", X: 1100, Y: 440,
+				Desc: "draft + target 双模型推测解码, 输出加速比与接受率",
+				Optional: true,
+				Params: []WFParam{
+					{Key: "draft", Label: "draft 模型", Default: "models/tinyllm-q4_k_m.gguf"},
+					{Key: "target", Label: "target 模型", Default: "models/tinyllm-target-q4_k_m.gguf"},
+					{Key: "draft_max", Label: "单次最多猜测", Default: "8"},
 				},
 			},
 		},
@@ -328,6 +380,57 @@ func (r *workflowRunner) runNode(ctx context.Context, node string, req *runReque
 			return nil
 		}
 
+	// ---------- 进阶阶段 (可选节点) ----------
+	case "train_target":
+		epochs := r.param(req, node, "epochs", "80")
+		cmd = exec.CommandContext(ctx, r.pythonCmd, "pipeline/train.py",
+			"--profile", "target", "--reuse-tokenizer", "--epochs", epochs)
+		cmd.Dir = r.root
+
+	case "sft":
+		epochs := r.param(req, node, "epochs", "3")
+		steps := r.param(req, node, "steps", "0")
+		args := []string{"pipeline/sft.py", "--epochs", epochs}
+		if steps != "" && steps != "0" {
+			args = append(args, "--steps", steps)
+		}
+		cmd = exec.CommandContext(ctx, r.pythonCmd, args...)
+		cmd.Dir = r.root
+
+	case "sweep":
+		dir := r.param(req, "export", "llamacpp_dir", "D:/tools/llama.cpp")
+		schemes := r.param(req, node, "schemes", "Q8_0,Q4_K_M,Q4_K_S,IQ4_XS")
+		imat := r.param(req, node, "imatrix", "auto")
+		args := []string{"pipeline/quantize_sweep.py", "--llama-cpp", dir, "--schemes", schemes}
+		if imat != "" && imat != "none" {
+			args = append(args, "--imatrix", imat)
+		}
+		cmd = exec.CommandContext(ctx, r.pythonCmd, args...)
+		cmd.Dir = r.root
+
+	case "eval":
+		dir := r.param(req, "export", "llamacpp_dir", "D:/tools/llama.cpp")
+		rounds := r.param(req, node, "rounds", "3")
+		maxTok := r.param(req, node, "max_tokens", "128")
+		kv := r.param(req, node, "kv_quant", "1")
+		args := []string{"pipeline/eval.py", "--llama-cpp", dir,
+			"--rounds", rounds, "--max-tokens", maxTok}
+		if kv == "1" {
+			args = append(args, "--kv-quant")
+		}
+		cmd = exec.CommandContext(ctx, r.pythonCmd, args...)
+		cmd.Dir = r.root
+
+	case "spec":
+		dir := r.param(req, "export", "llamacpp_dir", "D:/tools/llama.cpp")
+		draft := r.param(req, node, "draft", "models/tinyllm-q4_k_m.gguf")
+		target := r.param(req, node, "target", "models/tinyllm-target-q4_k_m.gguf")
+		dmax := r.param(req, node, "draft_max", "8")
+		cmd = exec.CommandContext(ctx, r.pythonCmd, "pipeline/spec_decode.py",
+			"--llama-cpp", dir, "--draft", draft, "--target", target,
+			"--draft-max", dmax)
+		cmd.Dir = r.root
+
 	default:
 		r.emit(ch, wfEvent{Event: "log", Node: node, Line: "未知节点: " + node})
 		r.emit(ch, wfEvent{Event: "status", Node: node, Status: "failed"})
@@ -456,10 +559,12 @@ func (r *workflowRunner) handleRun(c *gin.Context) {
 		}
 		// only 过滤 (调试): 保留指定节点及其前驱
 		runSet := map[string]bool{}
+		explicit := map[string]bool{}   // 用户在界面上明确要求运行的节点
 		if len(req.Only) > 0 {
 			need := map[string]bool{}
 			for _, id := range req.Only {
 				need[id] = true
+				explicit[id] = true
 			}
 			for _, id := range order {
 				for _, t := range adjOf(workflowDef(), id) {
@@ -473,9 +578,18 @@ func (r *workflowRunner) handleRun(c *gin.Context) {
 			}
 		}
 
+		def := workflowDef()
 		ok := true
 		for _, id := range order {
 			if len(runSet) > 0 && !runSet[id] {
+				r.emit(ch, wfEvent{Event: "status", Node: id, Status: "skipped"})
+				continue
+			}
+			// 可选节点 (SFT / 评测 / 投机解码等) 默认不参与「运行全部」,
+			// 需要单独点「仅运行此节点」才会执行
+			if isOptionalNode(def, id) && !explicit[id] {
+				r.emit(ch, wfEvent{Event: "log", Node: id,
+					Line: "ℹ 可选阶段, 未选择时跳过 (点「仅运行此节点」可单独执行)"})
 				r.emit(ch, wfEvent{Event: "status", Node: id, Status: "skipped"})
 				continue
 			}
@@ -507,6 +621,16 @@ func adjOf(def WFDef, from string) []string {
 		}
 	}
 	return out
+}
+
+// isOptionalNode 判断是否为可选阶段 (默认不参与「运行全部」)。
+func isOptionalNode(def WFDef, id string) bool {
+	for _, n := range def.Nodes {
+		if n.ID == id {
+			return n.Optional
+		}
+	}
+	return false
 }
 
 func (r *workflowRunner) handleCancel(c *gin.Context) {

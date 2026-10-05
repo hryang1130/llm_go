@@ -65,6 +65,13 @@
   }
   .wf-node:hover { border-color: var(--accent); }
   .wf-node.selected { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  /* 可选阶段 (SFT / 评测 / 投机解码等): 虚线边框 + 「可选」标记, 默认不参与「运行全部」 */
+  .wf-node.optional { border-style: dashed; }
+  .wf-node.optional .tag-opt {
+    font-size: 10px; padding: 1px 6px; border-radius: 999px;
+    background: var(--accent-soft); color: var(--accent); margin-left: 6px;
+    vertical-align: middle;
+  }
   .wf-node.st-running { border-color: var(--run); animation: pulse 1.2s infinite; }
   .wf-node.st-success { border-color: var(--ok); }
   .wf-node.st-failed { border-color: var(--fail); }
@@ -232,11 +239,13 @@ function buildNodes() {
   nodesEl.innerHTML = "";
   def.nodes.forEach(n => {
     const el = document.createElement("div");
-    el.className = "wf-node";
+    el.className = "wf-node" + (n.optional ? " optional" : "");
     el.id = "node-" + n.id;
     el.innerHTML =
       '<div class="head"><span class="icon">' + n.icon + '</span>' +
-      '<span class="title">' + n.label + '</span><span class="badge">待运行</span></div>' +
+      '<span class="title">' + n.label + '</span>' +
+      (n.optional ? '<span class="tag-opt">可选</span>' : '') +
+      '<span class="badge">待运行</span></div>' +
       '<div class="desc">' + n.desc + '</div>' +
       '<div class="logs"></div>' +
       '<div class="dot-in" data-node="' + n.id + '"></div>' +
@@ -507,8 +516,9 @@ btnStop.addEventListener("click", async () => {
 });
 btnReset.addEventListener("click", () => {
   def.nodes.forEach(n => { positions[n.id] = { x: n.x, y: n.y }; });
-  // 恢复默认连线 (拓扑序)
-  def.edges = def.nodes.slice(0, -1).map((n, i) => ({ from: n.id, to: def.nodes[i + 1].id }));
+  // 恢复默认连线 (仅主流程; 可选阶段保持孤立, 单独运行)
+  const main = def.nodes.filter(n => !n.optional);
+  def.edges = main.slice(0, -1).map((n, i) => ({ from: n.id, to: main[i + 1].id }));
   view = { x: 20, y: 20, scale: 1 };
   applyView(); buildNodes(); renderEdges(); saveLS(); renderPanelEmpty();
 });

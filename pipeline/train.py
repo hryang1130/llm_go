@@ -11,6 +11,9 @@
 
 用法:
   python pipeline/train.py [--epochs 30] [--batch-size 8]
+  python pipeline/train.py --profile target --reuse-tokenizer
+      # 训练第二档模型 (config 的 model_target 段) 作为投机解码的 target;
+      # --reuse-tokenizer 复用已有分词器, 保证与 draft 模型词表一致
 """
 
 import argparse
@@ -31,12 +34,11 @@ def load_config() -> dict:
         return yaml.safe_load(f)
 
 
-def train_tokenizer(cfg: dict):
+def train_tokenizer(cfg: dict, mcfg: dict):
     """在本地语料上训练一个 BPE 分词器。"""
     from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders, Regex
     from transformers import PreTrainedTokenizerFast
 
-    mcfg = cfg["model"]
     paths = cfg["paths"]
     corpus = ROOT / paths["corpus"]
     tokenizer_dir = ROOT / paths["tokenizer_dir"]
@@ -103,13 +105,22 @@ def main():
     parser = argparse.ArgumentParser(description="从零训练小型 LLaMA 模型")
     parser.add_argument("--epochs", type=int, default=None, help="覆盖配置中的训练轮数")
     parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--profile", choices=["tiny", "target"], default="tiny",
+                        help="tiny=默认小模型 (draft), target=config 中 model_target 段的更大模型")
+    parser.add_argument("--reuse-tokenizer", action="store_true",
+                        help="复用已有分词器 (投机解码要求 draft/target 词表一致)")
     parser.add_argument("--no-resume", action="store_true", help="忽略已有输出目录, 重新训练")
     args = parser.parse_args()
 
     cfg = load_config()
-    tcfg = cfg["train"]
-    mcfg = cfg["model"]
-    output_dir = ROOT / cfg["paths"]["output_dir"]
+    is_target = args.profile == "target"
+    tcfg = cfg.get("train_target", cfg["train"]) if is_target else cfg["train"]
+    mcfg = cfg.get("model_target", cfg["model"]) if is_target else cfg["model"]
+    paths = cfg["paths"]
+    output_dir = ROOT / (paths.get("output_target_dir", "models/tinyllm-target-hf")
+                         if is_target else paths["output_dir"])
+    print(f"[train] profile={args.profile}, 层数 {mcfg['num_hidden_layers']}, "
+          f"hidden {mcfg['hidden_size']}, 输出 {output_dir}")
 
     import torch
     from transformers import (
@@ -122,7 +133,18 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[train] 训练设备: {device}")
 
-    tokenizer = train_tokenizer(cfg)
+    tokenizer_dir = ROOT / paths["tokenizer_dir"]
+    if args.reuse_tokenizer:
+        from transformers import PreTrainedTokenizerFast
+        if not (tokenizer_dir / "tokenizer.json").exists():
+            sys.exit(f"[train] --reuse-tokenizer 需要已有分词器, 但 {tokenizer_dir} 下没有; "
+                     f"请先运行 python pipeline/train.py --profile tiny")
+        tokenizer = PreTrainedTokenizerFast.from_pretrained(
+            str(tokenizer_dir), model_max_length=mcfg["max_position_embeddings"])
+        print(f"[train] 复用分词器 {tokenizer_dir} (词表 {tokenizer.vocab_size}), "
+              f"保证与 draft 模型词表一致")
+    else:
+        tokenizer = train_tokenizer(cfg, mcfg)
     dataset = build_dataset(cfg, tokenizer, tcfg["block_size"])
 
     model_cfg = LlamaConfig(
@@ -167,9 +189,13 @@ def main():
     )
     trainer.train()
 
-    final_loss = trainer.state.log_history[-1].get("train_loss")
+    final_loss = next((h["train_loss"] for h in reversed(trainer.state.log_history)
+                       if "train_loss" in h), None)
     ppl = math.exp(final_loss) if final_loss and final_loss < 20 else float("inf")
-    print(f"[train] 训练完成, 最终 loss={final_loss:.4f}, perplexity={ppl:.2f}")
+    if final_loss is None:
+        print("[train] 训练完成 (日志中未记录 train_loss)")
+    else:
+        print(f"[train] 训练完成, 最终 loss={final_loss:.4f}, perplexity={ppl:.2f}")
 
     model.save_pretrained(str(output_dir))
     tokenizer.save_pretrained(str(output_dir))

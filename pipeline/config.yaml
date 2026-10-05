@@ -2,13 +2,24 @@
 # 所有流水线阶段共享这一份配置
 
 model:
-  # 小型 LLaMA 架构 (从零训练, CPU 可跑)
+  # 小型 LLaMA 架构 (从零训练, CPU 可跑) —— 同时作为投机解码的 draft 模型
   vocab_size: 2048            # BPE 词表大小
   hidden_size: 256            # 隐藏层维度
   intermediate_size: 768      # FFN 中间层维度
   num_hidden_layers: 4        # Transformer 层数
   num_attention_heads: 4      # 注意力头数
   num_key_value_heads: 2      # KV 头数 (GQA, 减小 KV 缓存)
+  max_position_embeddings: 512
+  rms_norm_eps: 1.0e-5
+
+model_target:
+  # 第二档模型: 作为投机解码的 target
+  # 必须与上面的 tiny 模型共用同一分词器 (训练时加 --reuse-tokenizer)
+  hidden_size: 512
+  intermediate_size: 1408
+  num_hidden_layers: 6
+  num_attention_heads: 8
+  num_key_value_heads: 4
   max_position_embeddings: 512
   rms_norm_eps: 1.0e-5
 
@@ -21,15 +32,64 @@ train:
   logging_steps: 10
   seed: 42
 
+train_target:
+  # target 模型更大, 同样的语料下步数可以少一些
+  block_size: 256
+  batch_size: 8
+  epochs: 80
+  learning_rate: 3.0e-4
+  warmup_steps: 30
+  logging_steps: 10
+  seed: 42
+
 paths:
   corpus: data/corpus.txt
   tokenizer_dir: models/tokenizer
-  output_dir: models/tinyllm-hf          # 训练产物 (HF 格式)
+  output_dir: models/tinyllm-hf          # 训练产物 (HF 格式, draft)
+  output_target_dir: models/tinyllm-target-hf   # target 模型训练产物
   gguf_f16: models/tinyllm-f16.gguf      # 导出的 FP16 GGUF
   gguf_q4: models/tinyllm-q4_k_m.gguf    # 量化后的 GGUF
 
 quantize:
-  type: Q4_K_M                # llama.cpp 量化方案
+  type: Q4_K_M                # llama.cpp 量化方案 (export_gguf.py 使用)
+  schemes:                    # quantize_sweep.py 批量对比的方案
+    - Q8_0
+    - Q4_K_M
+    - Q4_K_S
+    - IQ4_XS
+  imatrix:                    # 重要性矩阵校准 (同样 4bit, 精度更接近 F16)
+    enabled: true
+    calibration: data/corpus.txt   # 校准语料, 建议用真实领域文本
+    output: models/imatrix.dat
+    ctx_size: 512
+
+eval:                         # eval.py 的默认参数
+  corpus: data/eval.txt       # 困惑度语料, 建议换成自己的留出文本
+  ctx_size: 512
+  max_tokens: 128             # 每轮生成的 token 数
+  rounds: 3                   # 每项测几轮取中位数
+  kv_quant: true              # 是否额外测 KV cache 量化 (q8_0)
+
+spec:                         # spec_decode.py 的默认参数
+  draft: models/tinyllm-q4_k_m.gguf
+  target: models/tinyllm-target-q4_k_m.gguf
+  draft_max: 8                # 单次最多猜几个 token
+  draft_min: 2
+  draft_p_min: 0.6
+  max_tokens: 128
+  rounds: 3
+
+sft:                          # sft.py 的默认参数
+  data: data/sft_sample.jsonl
+  output_dir: models/tinyllm-hf-sft   # 合并后的 HF 模型
+  adapter_dir: out/lora-adapter       # 仅适配器
+  epochs: 3
+  lr: 1.0e-3
+  batch_size: 4
+  max_length: 256
+  lora_r: 8
+  lora_alpha: 16
+  lora_dropout: 0.05
 
 serve:
   llama_server_url: http://127.0.0.1:8081   # llama.cpp server 地址

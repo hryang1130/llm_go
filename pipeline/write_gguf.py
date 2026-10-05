@@ -10,8 +10,16 @@
   (与 train.py 中使用的 GPT-2 规则一致), 完全绕开该检查。
 
 依赖: torch, safetensors (随 transformers), gguf (pip install gguf)
+
+用法:
+  python pipeline/write_gguf.py                                   # 默认: tinyllm-hf -> tinyllm-f16.gguf
+  python pipeline/write_gguf.py --hf-dir models/tinyllm-target-hf \
+      --out models/tinyllm-target-f16.gguf --name tinyllm-target   # target 模型 (投机解码用)
+  python pipeline/write_gguf.py --hf-dir models/tinyllm-hf-sft \
+      --out models/tinyllm-sft-f16.gguf                            # SFT 后的模型
 """
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -46,10 +54,24 @@ def map_layer(i: int, name: str) -> str:
 
 
 def main():
+    parser = argparse.ArgumentParser(description="把 HF 训练产物写成 GGUF (绕过官方转换器的词表校验)")
+    parser.add_argument("--hf-dir", default="models/tinyllm-hf", help="HF 模型目录 (含 config.json/tokenizer.json)")
+    parser.add_argument("--out", default="models/tinyllm-f16.gguf", help="输出的 F16 GGUF 路径")
+    parser.add_argument("--name", default=None, help="GGUF 内的模型名 (默认取输出文件名)")
+    args = parser.parse_args()
+
     from gguf import GGUFWriter
 
-    hf_dir = ROOT / "models" / "tinyllm-hf"
-    out_path = ROOT / "models" / "tinyllm-f16.gguf"
+    hf_dir = Path(args.hf_dir)
+    if not hf_dir.is_absolute():
+        hf_dir = ROOT / hf_dir
+    out_path = Path(args.out)
+    if not out_path.is_absolute():
+        out_path = ROOT / out_path
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not (hf_dir / "config.json").exists():
+        sys.exit(f"[gguf] 目录下没有 config.json: {hf_dir}")
     cfg = json.loads((hf_dir / "config.json").read_text(encoding="utf-8"))
     tj = json.loads((hf_dir / "tokenizer.json").read_text(encoding="utf-8"))
 
@@ -63,7 +85,7 @@ def main():
     sd = load_file(str(hf_dir / "model.safetensors"))
 
     w = GGUFWriter(str(out_path), "llama")
-    w.add_name("tinyllm")
+    w.add_name(args.name or out_path.stem)
     w.add_description("Tiny LLaMA trained from scratch (llm_go workflow)")
     w.add_uint32("llama.block_count", n_layers)
     w.add_uint32("llama.context_length", cfg["max_position_embeddings"])

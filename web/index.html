@@ -163,6 +163,13 @@
   .wf-node.st-success { border-color: var(--ok); }
   .wf-node.st-failed  { border-color: var(--fail); }
   .wf-node.st-skipped { opacity: .5; filter: saturate(.4); }
+  /* 未参与「运行全部」的阶段: 灰显 + 角标, 与列表勾选状态一一对应 */
+  .wf-node.node-off { opacity: .45; filter: saturate(.25); }
+  .wf-node.node-off:hover { opacity: .85; filter: none; }
+  .wf-node .off-badge {
+    font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 999px;
+    background: rgba(148,163,184,.22); color: #94a3b8; margin-left: auto;
+  }
   @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(99,102,241,.35);} 50% { box-shadow: 0 0 0 10px rgba(99,102,241,0);} }
   .wf-node .head { display: flex; align-items: center; gap: 9px; padding: 11px 12px 4px; }
   .wf-node .head .icon {
@@ -214,7 +221,8 @@
     background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
     box-shadow: var(--shadow);
   }
-  .stage-row.off { opacity: .5; }
+  .stage-row.off { opacity: .55; }
+  .stage-row.sel { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
   .stage-row .idx {
     width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center;
     font-size: 12px; font-weight: 700; background: var(--accent-soft); color: var(--accent); flex: none;
@@ -436,14 +444,16 @@ const PRESETS = [
 
 // ---------- localStorage ----------
 const LS = { pos: "wf_pos_v1", edge: "wf_edges_v1", param: "wf_params_v1", view: "wf_view_v1",
-             theme: "wf_theme_v1", mode: "wf_mode_v1", enabled: "wf_enabled_v1" };
-let savedEdges = null, enabled = {}, mode = "canvas";
+             theme: "wf_theme_v1", mode: "wf_mode_v1", enabled: "wf_enabled_v1",
+             order: "wf_order_v1" };
+let savedEdges = null, enabled = {}, order = [], mode = "canvas";
 
 function loadLS() {
   try { positions = JSON.parse(localStorage.getItem(LS.pos)) || {}; } catch (e) { positions = {}; }
   try { savedEdges = JSON.parse(localStorage.getItem(LS.edge)) || null; } catch (e) { savedEdges = null; }
   try { params = JSON.parse(localStorage.getItem(LS.param)) || {}; } catch (e) { params = {}; }
   try { enabled = JSON.parse(localStorage.getItem(LS.enabled)) || {}; } catch (e) { enabled = {}; }
+  try { order = JSON.parse(localStorage.getItem(LS.order)) || []; } catch (e) { order = []; }
   try { const v = JSON.parse(localStorage.getItem(LS.view)); if (v) view = v; } catch (e) {}
   mode = localStorage.getItem(LS.mode) || "canvas";
   const theme = localStorage.getItem(LS.theme) || "dark";
@@ -455,6 +465,7 @@ function saveLS() {
   localStorage.setItem(LS.param, JSON.stringify(params));
   localStorage.setItem(LS.view, JSON.stringify(view));
   localStorage.setItem(LS.enabled, JSON.stringify(enabled));
+  localStorage.setItem(LS.order, JSON.stringify(order));
 }
 
 function applyTheme(theme) {
@@ -480,7 +491,8 @@ async function init() {
     if (!(n.id in enabled)) enabled[n.id] = !n.optional;   // 可选阶段默认不参与
   });
   buildNodes();
-  renderEdges();
+  ensureOrder();
+  syncPipeline();
   applyView();
   setMode(mode);
   pollHealth();
@@ -543,6 +555,7 @@ function setNodeStatus(id, st) {
     const badge = el.querySelector(".badge");
     if (badge) badge.textContent = { idle: "待运行", running: "运行中…", success: "✓ 成功",
                                      failed: "✗ 失败", skipped: "已跳过" }[st] || st;
+    el.classList.toggle("node-off", enabled[id] === false);
   }
   renderEdges();
   if (listView.classList.contains("on")) renderList();
@@ -619,9 +632,10 @@ function finishConnect(e) {
   const dotIn = target && target.closest ? target.closest(".dot-in") : null;
   if (dotIn) {
     const toId = dotIn.dataset.node;
-    if (toId !== connecting && !def.edges.some(x => x.from === connecting && x.to === toId)) {
-      def.edges.push({ from: connecting, to: toId });
-      saveLS();
+    if (toId !== connecting) {
+      // 画布上连线 = 把目标阶段挪到源阶段之后 (顺序仍是唯一事实来源)
+      moveAfter(connecting, toId);
+      statusText.textContent = `已把「${labelOf(toId)}」排到「${labelOf(connecting)}」之后`;
     }
   }
   connecting = null; tempEdge = null;
@@ -709,7 +723,9 @@ function fitView() {
 function selectNode(id) {
   selected = id;
   document.querySelectorAll(".wf-node").forEach(el => el.classList.remove("selected"));
-  if (!id) { renderPanelEmpty(); renderEdges(); return; }
+  if (!id) { renderPanelEmpty(); renderEdges();
+    if (listView.classList.contains("on")) renderList();
+    return; }
   document.getElementById("node-" + id).classList.add("selected");
   const n = def.nodes.find(x => x.id === id);
   let html = `<h2><span class="p-icon" style="background:${n._tint[0]}">${n.icon}</span>${n.label}</h2>` +
@@ -719,24 +735,26 @@ function selectNode(id) {
     html += `<div class="field"><label>${p.label}</label>` +
       `<input data-key="${k}" value="${escapeHtml(params[k])}"></div>`;
   });
+  const isOff = enabled[n.id] === false;
   html += `<div class="actions">` +
     `<button class="primary" onclick="runOnly('${n.id}')">▶ 仅运行此节点</button>` +
     `<button onclick="openReport(reports['${n.id}'])">📄 查看阶段报告</button>` +
-    `<button class="ghost-danger" onclick="deleteEdgesOf('${n.id}')">✂ 删除相关连线</button></div>`;
+    `<button class="${isOff ? '' : 'ghost-danger'}" onclick="toggleEnabledFromPanel('${n.id}')">` +
+      `${isOff ? '＋ 加入「运行全部」' : '－ 从「运行全部」移除'}</button></div>`;
   panel.innerHTML = html;
   panel.querySelectorAll("input").forEach(inp => {
     inp.addEventListener("change", () => { params[inp.dataset.key] = inp.value; saveLS(); });
   });
+  if (listView.classList.contains("on")) renderList();
 }
 function renderPanelEmpty() {
   panel.innerHTML = '<div class="empty"><span class="big">◇</span>点击节点查看 / 编辑参数<br>' +
     '或切到「列表」视图按顺序编排</div>';
 }
-function deleteEdgesOf(id) {
-  def.edges = def.edges.filter(e => e.from !== id && e.to !== id);
-  saveLS(); renderEdges();
-  if (listView.classList.contains("on")) renderList();
-}
+window.toggleEnabledFromPanel = function (id) {
+  setEnabled(id, enabled[id] === false);
+  selectNode(id);
+};
 function escapeHtml(s) {
   return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 }
@@ -754,7 +772,8 @@ function setMode(m) {
 document.getElementById("btn-canvas").addEventListener("click", () => setMode("canvas"));
 document.getElementById("btn-list").addEventListener("click", () => setMode("list"));
 
-// ---------- 列表视图 (友好编排: 勾选 + 上下移动 + 预设) ----------
+// ---------- 编排顺序: order 是唯一事实来源 ----------
+// 画布连线、列表顺序、勾选状态都从 order + enabled 派生, 避免两套状态互相打架。
 function chainOrder() {
   // 从 edges 推主线顺序 (拓扑), 孤立节点按默认 x 排序追加
   const indeg = {}, adj = {};
@@ -770,31 +789,79 @@ function chainOrder() {
   def.nodes.forEach(n => { if (!out.includes(n.id)) out.push(n.id); });
   return out;
 }
-function relinearize(order) {
-  const on = order.filter(id => enabled[id] !== false && !isOptional(id));
+function ensureOrder() {
+  const ids = def.nodes.map(n => n.id);
+  const ok = Array.isArray(order) && order.length === ids.length && ids.every(i => order.includes(i));
+  if (!ok) order = chainOrder();
+  // 规整成"主流程在前、可选阶段在后"(两段内保持原有相对顺序)
+  const nonOpt = order.filter(id => !isOptional(id));
+  const opt = order.filter(id => isOptional(id));
+  order = nonOpt.concat(opt);
+}
+
+// 按 order + enabled 重建主线连线, 并同步画布/列表/节点外观
+function syncPipeline(opts) {
+  const o = (opts && opts.order) || order;
+  order = o.slice();
+  const on = order.filter(id => enabled[id] !== false);
   def.edges = on.slice(0, -1).map((id, i) => ({ from: id, to: on[i + 1] }));
-  saveLS(); renderEdges();
+  saveLS();
+  renderEdges();
+  reflectEnabled();
+  if (listView.classList.contains("on")) renderList();
+}
+function reflectEnabled() {
+  def.nodes.forEach(n => {
+    const el = document.getElementById("node-" + n.id);
+    if (!el) return;
+    const off = enabled[n.id] === false;
+    el.classList.toggle("node-off", off);
+    let badge = el.querySelector(".off-badge");
+    if (off && !badge) {
+      badge = document.createElement("span");
+      badge.className = "off-badge";
+      badge.textContent = "未启用";
+      const head = el.querySelector(".head");
+      head.insertBefore(badge, head.querySelector(".badge"));
+    } else if (!off && badge) {
+      badge.remove();
+    }
+  });
+}
+// 画布上从 a 连到 b: 把 b 挪到 a 后面 (保持"一份顺序"), 并自动启用 b
+function moveAfter(a, b) {
+  if (a === b) return;
+  order = order.filter(x => x !== b);
+  order.splice(order.indexOf(a) + 1, 0, b);
+  enabled[b] = true;
+  syncPipeline();
+}
+function setEnabled(id, on) {
+  enabled[id] = on;
+  syncPipeline();
 }
 function isOptional(id) { const n = def.nodes.find(x => x.id === id); return !!(n && n.optional); }
+function labelOf(id) { const n = def.nodes.find(x => x.id === id); return n ? n.label : id; }
 
 function renderList() {
-  const order = chainOrder();
+  ensureOrder();
+  const order_ = order;
   let html = `<h2>按顺序编排</h2>
-    <div class="hint">勾选要参与「▶ 运行全部」的阶段，用 ↑ ↓ 调整先后顺序（会按勾选项重连成一条主线）。
-      可选阶段默认不参与一键运行；单独点「▶ 运行」只跑该节点及其前驱。</div>
+    <div class="hint">勾选要参与「▶ 运行全部」的阶段，用 ↑ ↓ 调整先后顺序；这里改动会即时同步到画布
+      （未勾选的阶段在画布上显示为「未启用」灰色）。可选阶段默认不参与一键运行；单独点「▶ 运行」只跑该节点及其前驱。</div>
     <div class="preset-bar"><span style="font-size:12px;color:var(--muted)">预设：</span>` +
     PRESETS.map(p => `<span class="chip" data-preset="${p.id}" title="${p.desc}">${p.name}</span>`).join("") +
     `</div>`;
 
-  const main = order.filter(id => !isOptional(id));
-  const opt  = order.filter(id => isOptional(id));
+  const main = order_.filter(id => !isOptional(id));
+  const opt  = order_.filter(id => isOptional(id));
   const row = (id, i, list, optional) => {
     const n = def.nodes.find(x => x.id === id);
     const on = enabled[id] !== false;
     const st = statuses[id] || "idle";
     const stText = { idle: "待运行", running: "运行中…", success: "✓ 成功", failed: "✗ 失败", skipped: "已跳过" }[st];
     const rep = reports[id] ? `<button data-open="${reports[id]}">📄 报告</button>` : "";
-    return `<div class="stage-row ${optional ? "optional" : ""} ${on ? "" : "off"}">
+    return `<div class="stage-row ${optional ? "optional" : ""} ${on ? "" : "off"} ${selected === id ? "sel" : ""}">
       <label class="switch"><input type="checkbox" data-toggle="${id}" ${on ? "checked" : ""}></label>
       <div class="idx">${i + 1}</div>
       <div class="info">
@@ -818,13 +885,13 @@ function renderList() {
 
   listView.innerHTML = html;
   listView.querySelectorAll("[data-toggle]").forEach(cb =>
-    cb.addEventListener("change", () => { enabled[cb.dataset.toggle] = cb.checked; saveLS(); renderList(); }));
+    cb.addEventListener("change", () => setEnabled(cb.dataset.toggle, cb.checked)));
   listView.querySelectorAll("[data-up]").forEach(b => b.addEventListener("click",
     () => move(b.dataset.up, -1)));
   listView.querySelectorAll("[data-down]").forEach(b => b.addEventListener("click",
     () => move(b.dataset.down, +1)));
   listView.querySelectorAll("[data-params]").forEach(b => b.addEventListener("click",
-    () => selectNode(b.dataset.params)));
+    () => { selectNode(b.dataset.params); renderList(); }));
   listView.querySelectorAll("[data-run1]").forEach(b => b.addEventListener("click",
     () => runWorkflow([b.dataset.run1])));
   listView.querySelectorAll("[data-open]").forEach(b => b.addEventListener("click",
@@ -833,22 +900,21 @@ function renderList() {
     () => applyPreset(b.dataset.preset)));
 }
 function move(id, delta) {
-  const order = chainOrder();
+  ensureOrder();
   const list = order.filter(x => isOptional(x) === isOptional(id));
   const i = list.indexOf(id), j = i + delta;
   if (i < 0 || j < 0 || j >= list.length) return;
   [list[i], list[j]] = [list[j], list[i]];
+  // 保持"主流程在前、可选阶段在后"的分段顺序
   const newOrder = isOptional(id) ? order.filter(x => !isOptional(x)).concat(list)
                                   : list.concat(order.filter(x => isOptional(x)));
-  relinearize(newOrder);
-  renderList();
+  syncPipeline({ order: newOrder });
 }
 function applyPreset(pid) {
   const p = PRESETS.find(x => x.id === pid);
-  if (!p || !p.order) { renderList(); return; }
+  if (!p || !p.order) return;
   def.nodes.forEach(n => { enabled[n.id] = p.order.includes(n.id); });
-  relinearize(p.order);
-  renderList();
+  syncPipeline({ order: p.order });
   statusText.textContent = `已应用预设：${p.name}`;
 }
 
@@ -975,7 +1041,7 @@ async function runWorkflow(only) {
     statuses[n.id] = "idle";
     const el = document.getElementById("node-" + n.id);
     if (el) {
-      el.className = "wf-node" + (n.optional ? " optional" : "");
+      el.className = "wf-node" + (n.optional ? " optional" : "") + (enabled[n.id] === false ? " node-off" : "");
       const b = el.querySelector('[data-report]');
       if (b) b.style.display = "none";
       const box = nodeLogs(n.id);
@@ -1052,9 +1118,9 @@ btnReset.addEventListener("click", () => {
   const main = def.nodes.filter(n => !n.optional);
   def.edges = main.slice(0, -1).map((n, i) => ({ from: n.id, to: main[i + 1].id }));
   def.nodes.forEach(n => { enabled[n.id] = !n.optional; });
+  order = chainOrder();
   view = { x: 20, y: 20, scale: 1 };
-  applyView(); buildNodes(); renderEdges(); saveLS(); renderPanelEmpty();
-  if (listView.classList.contains("on")) renderList();
+  applyView(); buildNodes(); syncPipeline(); saveLS(); renderPanelEmpty();
 });
 
 init();

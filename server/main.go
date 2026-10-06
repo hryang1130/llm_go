@@ -275,6 +275,8 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Println("正在关闭网关 ...")
+	// 一并停掉 deploy 节点拉起的 llama-server, 避免留下占用 8081 的僵尸进程
+	runner.stopLlamaServer()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {

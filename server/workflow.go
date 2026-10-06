@@ -367,7 +367,12 @@ func (r *workflowRunner) runNode(ctx context.Context, node string, req *runReque
 			r.emit(ch, wfEvent{Event: "status", Node: node, Status: "failed"})
 			return false
 		}
-		ls := exec.CommandContext(ctx, binPath,
+		// 先停掉上一次留下的实例, 否则端口被占会启动失败
+		r.stopLlamaServer()
+		// 注意: 用独立的 context (不是本次运行的 ctx) —— llama-server 要一直活着,
+		// 否则工作流一结束就会被 CommandContext 杀掉, 用户拿不到可用的服务。
+		// 只有 /api/cancel 或再次运行 deploy 才会停止它。
+		ls := exec.CommandContext(context.Background(), binPath,
 			"-m", model, "--host", "127.0.0.1", "--port", port, "--ctx-size", ctxSize)
 		ls.Dir = r.root
 		// 输出落到日志文件, 启动失败时回显末尾几行 (否则用户只看到"健康检查超时")
@@ -387,7 +392,9 @@ func (r *workflowRunner) runNode(ctx context.Context, node string, req *runReque
 			r.emit(ch, wfEvent{Event: "status", Node: node, Status: "failed"})
 			return false
 		}
+		r.mu.Lock()
 		r.llamaServer = ls
+		r.mu.Unlock()
 		exited := make(chan struct{})
 		go func() { _ = ls.Wait(); close(exited) }() // 提前退出时用 exited 立即结束等待
 		action = func() error {
@@ -744,19 +751,41 @@ func isOptionalNode(def WFDef, id string) bool {
 	return false
 }
 
-func (r *workflowRunner) handleCancel(c *gin.Context) {
+// stopLlamaServer 停掉 deploy 节点拉起的 llama-server (取消运行 / 网关退出时调用)。
+// 返回是否真的停掉了一个进程。
+func (r *workflowRunner) stopLlamaServer() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.llamaServer == nil || r.llamaServer.Process == nil {
+		return false
+	}
+	_ = r.llamaServer.Process.Kill()
+	r.llamaServer = nil
+	return true
+}
+
+func (r *workflowRunner) handleCancel(c *gin.Context) {
+	r.mu.Lock()
 	if !r.running || r.cancel == nil {
-		c.JSON(http.StatusOK, gin.H{"ok": false, "msg": "当前没有运行中的工作流"})
+		killed := r.stopLlamaServerLocked()
+		r.mu.Unlock()
+		c.JSON(http.StatusOK, gin.H{"ok": killed, "msg": "当前没有运行中的工作流, 已停止推理服务"})
 		return
 	}
 	r.cancel()
-	if r.llamaServer != nil && r.llamaServer.Process != nil {
-		r.llamaServer.Process.Kill()
-		r.llamaServer = nil
+	killed := r.stopLlamaServerLocked()
+	r.mu.Unlock()
+	c.JSON(http.StatusOK, gin.H{"ok": true, "msg": "已发送取消信号", "llama_server_stopped": killed})
+}
+
+// stopLlamaServerLocked 与 stopLlamaServer 相同, 但调用方需已持有 r.mu。
+func (r *workflowRunner) stopLlamaServerLocked() bool {
+	if r.llamaServer == nil || r.llamaServer.Process == nil {
+		return false
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "msg": "已发送取消信号"})
+	_ = r.llamaServer.Process.Kill()
+	r.llamaServer = nil
+	return true
 }
 
 // ---------- 小工具 ----------

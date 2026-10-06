@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -178,6 +179,7 @@ type workflowRunner struct {
 	llamaServer *exec.Cmd // deploy 节点启动的长驻进程, cancel 时一并停止
 	root        string    // 项目根目录 (pipeline/ 所在处)
 	pythonCmd   string
+	gatewayPort string // 网关自身端口 (报告里给出调用地址)
 }
 
 func newWorkflowRunner() *workflowRunner {
@@ -187,7 +189,11 @@ func newWorkflowRunner() *workflowRunner {
 	if note != "" {
 		log.Printf("提示: %s", note)
 	}
-	return &workflowRunner{root: root, pythonCmd: py}
+	port := os.Getenv("GATEWAY_PORT")
+	if port == "" {
+		port = "8080"
+	}
+	return &workflowRunner{root: root, pythonCmd: py, gatewayPort: port}
 }
 
 // detectPython 挑一个真正装了流水线依赖的 Python。
@@ -273,10 +279,11 @@ func findProjectRoot() string {
 
 // SSE 事件
 type wfEvent struct {
-	Event  string `json:"event"`            // status | log | done
+	Event  string `json:"event"`            // status | log | report | done
 	Node   string `json:"node,omitempty"`
 	Status string `json:"status,omitempty"` // running | success | failed | skipped
 	Line   string `json:"line,omitempty"`
+	Report string `json:"report,omitempty"` // 阶段报告文件名 (event=report)
 	OK     bool   `json:"ok,omitempty"`
 	Msg    string `json:"msg,omitempty"`
 }
@@ -418,6 +425,20 @@ func (r *workflowRunner) runNode(ctx context.Context, node string, req *runReque
 					if resp.StatusCode == http.StatusOK {
 						r.emit(ch, wfEvent{Event: "log", Node: node,
 							Line: fmt.Sprintf("llama-server 就绪: %s (端口 %s)", filepath.Base(binPath), port)})
+						r.writeStageReport("deploy", "推理服务部署报告", true,
+							fmt.Sprintf("llama-server 已加载 `%s`，监听 `127.0.0.1:%s`，上下文 %s。",
+								filepath.Base(model), port, ctxSize),
+							[][2]string{
+								{"模型", filepath.Base(model)},
+								{"服务地址", "http://127.0.0.1:" + port},
+								{"上下文长度", ctxSize},
+								{"二进制", binPath},
+								{"状态", "健康检查通过 (/health)"},
+							},
+							[]string{model},
+							fmt.Sprintf("服务进程由网关托管，工作流结束后仍在运行。客户端可访问网关 "+
+								"`http://localhost:%s/v1/chat/completions`（OpenAI 兼容）。"+
+								"再次运行 deploy 会先停掉旧实例；点「■ 停止」也会一并停止。", r.gatewayPort))
 						return nil
 					}
 				}
@@ -446,26 +467,48 @@ func (r *workflowRunner) runNode(ctx context.Context, node string, req *runReque
 			}
 			sc := bufio.NewScanner(resp.Body)
 			var out string
+			var speed float64
+			genTokens := 0
 			for sc.Scan() {
 				line := strings.TrimSpace(sc.Text())
 				if !strings.HasPrefix(line, "data: ") {
 					continue
 				}
 				var chunk struct {
-					Content  string `json:"content"`
-					Stop     bool   `json:"stop"`
-					Timings  map[string]any `json:"timings"`
+					Content string         `json:"content"`
+					Stop    bool           `json:"stop"`
+					Timings map[string]any `json:"timings"`
 				}
 				if json.Unmarshal([]byte(line[6:]), &chunk) == nil {
 					out += chunk.Content
 					if chunk.Timings != nil {
 						if v, ok := chunk.Timings["predicted_per_second"].(float64); ok {
+							speed = v
 							r.emit(ch, wfEvent{Event: "log", Node: node, Line: fmt.Sprintf("生成速度: %.1f tok/s", v)})
+						}
+						if v, ok := chunk.Timings["predicted_n"].(float64); ok {
+							genTokens = int(v)
 						}
 					}
 				}
 			}
 			r.emit(ch, wfEvent{Event: "log", Node: node, Line: fmt.Sprintf("生成结果: %s", out)})
+			tokNote := np + " tokens"
+			if genTokens > 0 {
+				tokNote = fmt.Sprintf("%d tokens", genTokens)
+			}
+			r.writeStageReport("test", "服务冒烟测试报告", true,
+				fmt.Sprintf("向推理服务发送 prompt「%s」，生成 %s，解码 %.0f tok/s。",
+					prompt, tokNote, speed),
+				[][2]string{
+					{"Prompt", prompt},
+					{"生成长度", tokNote},
+					{"解码速度", fmt.Sprintf("%.1f tok/s", speed)},
+					{"接口", "/completion (流式)"},
+				},
+				nil,
+				"生成内容:\n\n```text\n"+out+"\n```\n\n"+
+					"这是从零训练的小模型，输出以验证链路为主；换更大的语料/模型后质量会明显提升。")
 			return nil
 		}
 
@@ -545,6 +588,10 @@ func (r *workflowRunner) runNode(ctx context.Context, node string, req *runReque
 		return false
 	}
 	r.emit(ch, wfEvent{Event: "status", Node: node, Status: "success"})
+	// 通知前端该节点产出的阶段报告 (Python 脚本写的, 或下面 deploy/test 由网关补写)
+	if f := r.reportOf(node); f != "" {
+		r.emit(ch, wfEvent{Event: "report", Node: node, Report: f})
+	}
 	return true
 }
 
@@ -698,6 +745,8 @@ func (r *workflowRunner) handleRun(c *gin.Context) {
 
 		def := wdef
 		ok := true
+		started := time.Now()
+		var ran []nodeRun
 		for _, id := range order {
 			if len(runSet) > 0 && !runSet[id] {
 				r.emit(ch, wfEvent{Event: "status", Node: id, Status: "skipped"})
@@ -715,8 +764,11 @@ func (r *workflowRunner) handleRun(c *gin.Context) {
 				r.emit(ch, wfEvent{Event: "status", Node: id, Status: "skipped"})
 				continue
 			}
+			t0 := time.Now()
 			ok = r.runNode(ctx, id, &req, ch)
+			ran = append(ran, nodeRun{id: id, dur: time.Since(t0)})
 		}
+		r.writeRunSummary(ran, ok, time.Since(started))
 		ch <- wfEvent{Event: "done", OK: ok}
 	}()
 
@@ -786,6 +838,216 @@ func (r *workflowRunner) stopLlamaServerLocked() bool {
 	_ = r.llamaServer.Process.Kill()
 	r.llamaServer = nil
 	return true
+}
+
+// ---------- 阶段报告 ----------
+
+// reportsDir 各阶段报告目录 (与 pipeline/common.py 的约定一致)。
+func (r *workflowRunner) reportsDir() string {
+	return filepath.Join(r.root, "out", "reports")
+}
+
+type reportItem struct {
+	Stage string `json:"stage"`
+	Title string `json:"title"`
+	File  string `json:"file"`
+	OK    bool   `json:"ok"`
+	MTime string `json:"mtime"`
+	Bytes int64  `json:"bytes"`
+}
+
+// readReportIndex 读 out/reports/index.json (脚本侧写入), 失败时返回空表。
+func (r *workflowRunner) readReportIndex() map[string]reportItem {
+	out := map[string]reportItem{}
+	b, err := os.ReadFile(filepath.Join(r.reportsDir(), "index.json"))
+	if err != nil {
+		return out
+	}
+	var data struct {
+		Stages map[string]struct {
+			Stage string `json:"stage"`
+			Title string `json:"title"`
+			File  string `json:"file"`
+			OK    bool   `json:"ok"`
+			MTime string `json:"mtime"`
+		} `json:"stages"`
+	}
+	if json.Unmarshal(b, &data) != nil {
+		return out
+	}
+	for k, v := range data.Stages {
+		out[k] = reportItem{Stage: v.Stage, Title: v.Title, File: v.File, OK: v.OK, MTime: v.MTime}
+	}
+	return out
+}
+
+// handleListReports 列出 out/reports 下的报告 (含脚本写的与网关写的)。
+func (r *workflowRunner) handleListReports(c *gin.Context) {
+	idx := r.readReportIndex()
+	dir := r.reportsDir()
+	entries, _ := os.ReadDir(dir)
+	items := make([]reportItem, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") || e.Name() == "index.md" {
+			continue
+		}
+		stage := strings.TrimSuffix(e.Name(), ".md")
+		item := idx[stage]
+		item.Stage, item.File = stage, e.Name()
+		if item.Title == "" {
+			item.Title = stage + " 报告"
+		}
+		if info, err := e.Info(); err == nil {
+			item.Bytes = info.Size()
+			item.MTime = info.ModTime().Format("2006-01-02 15:04:05")
+		}
+		items = append(items, item)
+	}
+	// 新报告排前面
+	sort.Slice(items, func(i, j int) bool { return items[i].MTime > items[j].MTime })
+	c.JSON(http.StatusOK, gin.H{"reports": items, "dir": relToRoot(r.root, dir)})
+}
+
+// handleReportContent 返回单个报告的 Markdown 原文。
+func (r *workflowRunner) handleReportContent(c *gin.Context) {
+	name := c.Query("name")
+	if name == "" || name != filepath.Base(name) || !strings.HasSuffix(name, ".md") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "非法的报告名"})
+		return
+	}
+	p := filepath.Join(r.reportsDir(), name)
+	b, err := os.ReadFile(p)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "报告不存在: " + name})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"name": name, "markdown": string(b)})
+}
+
+// writeStageReport 网关侧生成的阶段报告 (deploy / test / run 这类没有 Python 脚本的节点)。
+func (r *workflowRunner) writeStageReport(stage, title string, ok bool,
+	summary string, metrics [][2]string, artifacts []string, notes string) {
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "# %s\n\n**状态**: %s　|　**生成时间**: %s\n\n",
+		title, map[bool]string{true: "✅ 成功", false: "❌ 失败"}[ok],
+		time.Now().Format("2006-01-02 15:04:05"))
+	if summary != "" {
+		fmt.Fprintf(&b, "%s\n\n", summary)
+	}
+	if len(metrics) > 0 {
+		b.WriteString("## 关键指标\n\n| 指标 | 值 |\n|---|---|\n")
+		for _, kv := range metrics {
+			fmt.Fprintf(&b, "| %s | %s |\n", kv[0], kv[1])
+		}
+		b.WriteString("\n")
+	}
+	if len(artifacts) > 0 {
+		b.WriteString("## 产物\n\n| 文件 | 体积 |\n|---|---|\n")
+		for _, a := range artifacts {
+			size := "缺失"
+			if st, err := os.Stat(a); err == nil {
+				if st.IsDir() {
+					size = "目录"
+				} else {
+					size = fmt.Sprintf("%.2f MB", float64(st.Size())/1e6)
+				}
+			}
+			fmt.Fprintf(&b, "| `%s` | %s |\n", relToRoot(r.root, a), size)
+		}
+		b.WriteString("\n")
+	}
+	if notes != "" {
+		fmt.Fprintf(&b, "## 备注\n\n%s\n", notes)
+	}
+
+	dir := r.reportsDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	name := stage + ".md"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(b.String()), 0o644); err != nil {
+		return
+	}
+	r.registerReport(stage, title, name, ok)
+}
+
+// registerReport 把网关卡片的报告合并进 index.json (与 Python 侧共用同一份索引)。
+func (r *workflowRunner) registerReport(stage, title, file string, ok bool) {
+	path := filepath.Join(r.reportsDir(), "index.json")
+	data := map[string]any{}
+	if b, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(b, &data)
+	}
+	stages, _ := data["stages"].(map[string]any)
+	if stages == nil {
+		stages = map[string]any{}
+	}
+	stages[stage] = map[string]any{
+		"stage": stage, "title": title, "file": file, "ok": ok,
+		"mtime": time.Now().Format("2006-01-02 15:04:05"),
+	}
+	data["stages"] = stages
+	data["updated"] = time.Now().Format("2006-01-02 15:04:05")
+	if b, err := json.MarshalIndent(data, "", "  "); err == nil {
+		_ = os.WriteFile(path, append(b, '\n'), 0o644)
+	}
+}
+
+// reportOf 返回某节点本次运行对应的报告文件名 (没有则空串), 用于 SSE 通知前端。
+func (r *workflowRunner) reportOf(stage string) string {
+	p := filepath.Join(r.reportsDir(), stage+".md")
+	if _, err := os.Stat(p); err == nil {
+		return stage + ".md"
+	}
+	return ""
+}
+
+func relToRoot(root, p string) string {
+	if rel, err := filepath.Rel(root, p); err == nil {
+		return filepath.ToSlash(rel)
+	}
+	return p
+}
+
+// nodeRun 单个节点的执行结果 (供运行总结报告用)。
+type nodeRun struct {
+	id  string
+	dur time.Duration
+}
+
+// writeRunSummary 本次运行的汇总报告: 跑了哪些节点、各自成败、产物报告链接。
+func (r *workflowRunner) writeRunSummary(nodes []nodeRun, ok bool, dur time.Duration) {
+	idx := r.readReportIndex()
+	var b strings.Builder
+	status := "✅ 全部成功"
+	if !ok {
+		status = "❌ 存在失败节点"
+	}
+	fmt.Fprintf(&b, "# 本次运行总结\n\n**状态**: %s　|　**开始时间**: %s　|　**总耗时**: %s\n\n",
+		status, time.Now().Add(-dur).Format("2006-01-02 15:04:05"), dur.Round(time.Second))
+	b.WriteString("## 阶段一览\n\n| 阶段 | 结果 | 耗时 | 报告 |\n|---|---|---|---|\n")
+	for _, nr := range nodes {
+		id := nr.id
+		item, has := idx[id]
+		res := "✅"
+		report := "—"
+		if has {
+			if !item.OK {
+				res = "❌"
+			}
+			report = fmt.Sprintf("[%s](%s)", item.Title, item.File)
+		}
+		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", id, res, nr.dur.Round(time.Millisecond), report)
+	}
+	b.WriteString("\n> 各阶段报告的完整内容在 `out/reports/` 下，界面上点节点卡片的「报告」即可查看。\n")
+
+	dir := r.reportsDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(dir, "run.md"), []byte(b.String()), 0o644)
+	r.registerReport("run", "本次运行总结", "run.md", ok)
 }
 
 // ---------- 小工具 ----------

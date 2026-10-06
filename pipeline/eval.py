@@ -38,8 +38,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import (  # noqa: E402
     ROOT, cfg_get, find_binary, free_port, http_json, load_config, markdown_table,
-    process_memory_mb, read_log, resolve_path, run, size_mb, try_find_binary,
-    wait_for_http, write_report,
+    process_memory_mb, read_log, resolve_path, run, size_mb, stage_report,
+    try_find_binary, wait_for_http, write_report,
 )
 
 PROMPT = "人工智能是计算机科学的一个分支，"
@@ -383,6 +383,32 @@ def main():
     json_path.write_text(json.dumps({"config": vars(args), "results": results},
                                     ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[eval] JSON 结果: {json_path}")
+
+    # ---------- 阶段报告 ----------
+    ok = [r for r in results if r.get("decode_tok_s")]
+    fastest = max(ok, key=lambda r: r["decode_tok_s"]) if ok else None
+    stage_report(
+        "eval",
+        summary=f"评测 {len(results)} 个模型：上下文 {ctx}、每轮 {max_tokens} tokens、"
+                f"{rounds} 轮取中位数"
+                + (f"，解码最快 **{Path(fastest['path']).name} "
+                   f"{fastest['decode_tok_s']:.0f} tok/s**。" if fastest else "。"),
+        metrics={
+            "评测模型数": len(results),
+            "上下文 / 生成长度": f"{ctx} / {max_tokens}",
+            "测量轮数": rounds,
+            "KV cache 量化": "开启 (q8_0)" if getattr(args, "kv_quant", False) else "关闭",
+            "PPL 语料": corpus.name,
+        },
+        tables=[("总表", markdown_table(
+            ["模型", "体积", "PPL", "PPL 变化", "TTFT(ms)", "预填充(tok/s)",
+             "解码(tok/s)", "KV q8_0 解码", "服务端 RSS(MB)"], rows))],
+        artifacts=[Path(r["path"]) for r in results if r.get("path")] + [json_path],
+        links=[("完整报告 (含解读)", "benchmark.md")],
+        notes="PPL 变化是量化损失的直接指标（4bit 通常高几个百分点）；解码吞吐决定端侧体感速度。"
+              + ("\n\n> 本次有模型的 PPL 未取到，检查评测语料长度是否 ≥ 2×上下文。"
+                 if len([r for r in results if not r.get("ppl")]) == len(results) else ""),
+    )
 
 
 if __name__ == "__main__":

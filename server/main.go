@@ -238,6 +238,9 @@ func main() {
 	r.GET("/api/workflow", runner.handleGetWorkflow)
 	r.POST("/api/run", runner.handleRun)
 	r.POST("/api/cancel", runner.handleCancel)
+	// 阶段报告: 列表 + 单篇 Markdown 原文
+	r.GET("/api/reports", runner.handleListReports)
+	r.GET("/api/reports/content", runner.handleReportContent)
 
 	// 工作流前端 (节点编辑器)
 	webDir := envOr("WEB_DIR", "../web")

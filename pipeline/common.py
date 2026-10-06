@@ -24,8 +24,6 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-import yaml
-
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "pipeline" / "config.yaml"
 
@@ -60,7 +58,12 @@ INSTALL_HINT = (
 # 配置
 # --------------------------------------------------------------------------- #
 def load_config(path: str | Path | None = None) -> dict:
-    """读取全局配置 (默认 pipeline/config.yaml)。"""
+    """读取全局配置 (默认 pipeline/config.yaml)。
+
+    yaml 延迟导入: 这样 common 本身能在没装 pyyaml 的解释器里被导入,
+    data_check 之类只依赖标准库的节点仍可正常输出阶段报告。
+    """
+    import yaml
     with open(path or CONFIG_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
@@ -287,6 +290,168 @@ def write_report(path: str | Path, title: str, body: str) -> Path:
                  encoding="utf-8", newline="\n")
     print(f"[report] 已写入 {p}")
     return p
+
+
+# --------------------------------------------------------------------------- #
+# 分阶段报告: 每个环节跑完都留一份 out/reports/<stage>.md
+#
+# 约定:
+#   * 文件名固定为 <stage>.md (工作流节点 id 同名), 便于界面按节点找报告
+#   * 同时维护 out/reports/index.json, 网关读它来列出/展示报告
+#   * 脚本只需在结尾调用 stage_report(...), 报告自然带上耗时/产物/指标/日志
+# --------------------------------------------------------------------------- #
+REPORTS_DIR = ROOT / "out" / "reports"
+REPORTS_INDEX = REPORTS_DIR / "index.json"
+
+# 节点 -> 报告文件 (与 server/workflow.go 的节点 id 保持一致)
+STAGE_TITLES = {
+    "data": "数据准备报告",
+    "train": "模型训练报告",
+    "train_target": "target 模型训练报告",
+    "sft": "LoRA 指令微调报告",
+    "export": "GGUF 导出报告",
+    "quantize": "量化报告",
+    "sweep": "量化方案对比报告",
+    "eval": "评测基准报告",
+    "spec": "投机解码实验报告",
+    "deploy": "推理服务部署报告",
+    "test": "服务冒烟测试报告",
+}
+
+
+class StageTimer:
+    """with StageTimer() as t: ... ; t.seconds / t.human"""
+
+    def __enter__(self):
+        self._t0 = time.time()
+        return self
+
+    def __exit__(self, *exc):
+        self.seconds = time.time() - self._t0
+        return False
+
+    @property
+    def human(self) -> str:
+        return format_duration(getattr(self, "seconds", 0.0))
+
+
+def format_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f} 秒"
+    m, s = divmod(seconds, 60)
+    return f"{int(m)} 分 {s:.0f} 秒"
+
+
+def _kv_table(metrics: dict) -> str:
+    rows = [[k, v] for k, v in metrics.items()]
+    return markdown_table(["指标", "值"], rows)
+
+
+def stage_report(stage: str, *, summary: str = "", metrics: dict | None = None,
+                 tables: list[tuple[str, str]] | None = None,
+                 artifacts: list[str | Path] | None = None,
+                 logs: list[str | Path] | None = None,
+                 links: list[tuple[str, str]] | None = None,
+                 notes: str = "", ok: bool = True, duration: float | None = None,
+                 title: str | None = None) -> Path:
+    """写一份阶段报告, 并登记到 out/reports/index.json。
+
+    Args:
+        stage:    阶段名 (= 工作流节点 id), 决定文件名
+        summary:  一段话结论
+        metrics:  关键指标 (有序 dict, 渲染成表)
+        tables:   [(小标题, Markdown 表格)] 额外表格
+        artifacts: 产物文件 (自动带上体积)
+        logs:     关联的日志文件
+        links:    相关报告链接 [(说明, 相对路径)]
+        notes:    注意事项 / 下一步
+        ok:       该阶段是否成功
+    """
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    name = STAGE_TITLES.get(stage, f"{stage} 报告")
+    lines = [f"# {title or name}", "",
+             f"**状态**: {'✅ 成功' if ok else '❌ 失败'}　|　**生成时间**: {stamp}"]
+    if duration is not None:
+        lines.append(f"　|　**耗时**: {format_duration(duration)}")
+    lines.append("")
+    if summary:
+        lines += [summary, ""]
+    if metrics:
+        lines += ["## 关键指标", "", _kv_table(metrics), ""]
+    for cap, table in tables or []:
+        lines += [f"## {cap}", "", table, ""]
+    if artifacts:
+        rows = []
+        for a in artifacts:
+            p = Path(a)
+            if not p.is_absolute():
+                p = ROOT / p
+            exists = p.exists()
+            try:
+                rel = p.relative_to(ROOT).as_posix()
+            except ValueError:
+                rel = str(p)
+            if p.is_dir():
+                size = "目录"
+            elif exists:
+                size = f"{size_mb(p):.2f} MB"
+            else:
+                size = "缺失"
+            rows.append([rel, size])
+        lines += ["## 产物", "", markdown_table(["文件", "体积"], rows), ""]
+    if links:
+        lines += ["## 相关报告", ""]
+        lines += [f"- [{label}]({href})" for label, href in links]
+        lines.append("")
+    if logs:
+        lines += ["## 日志", ""]
+        for l in logs:
+            p = Path(l)
+            try:
+                rel = p.relative_to(ROOT).as_posix()
+            except ValueError:
+                rel = str(p)
+            lines.append(f"- `{rel}`")
+        lines.append("")
+    if notes:
+        lines += ["## 备注", "", notes, ""]
+
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    out = REPORTS_DIR / f"{stage}.md"
+    out.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8", newline="\n")
+    _register_report(stage, out, title or name, ok)
+    print(f"[report] 阶段报告: {out.relative_to(ROOT).as_posix()}")
+    return out
+
+
+def _register_report(stage: str, path: Path, title: str, ok: bool) -> None:
+    """把报告登记进 index.json, 并刷新人类可读的 index.md。"""
+    data = {}
+    if REPORTS_INDEX.exists():
+        try:
+            data = json.loads(REPORTS_INDEX.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    entries = data.get("stages", {})
+    entries[stage] = {
+        "stage": stage,
+        "title": title,
+        "file": path.name,
+        "ok": ok,
+        "mtime": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    data["stages"] = entries
+    data["updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    REPORTS_INDEX.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                             encoding="utf-8", newline="\n")
+
+    order = [s for s in STAGE_TITLES if s in entries]
+    rows = [[entries[s]["title"], "✅" if entries[s]["ok"] else "❌",
+             entries[s]["mtime"], f"[查看]({entries[s]['file']})"] for s in order]
+    (REPORTS_DIR / "index.md").write_text(
+        "# 各阶段报告索引\n\n_最近更新: " + data["updated"] + "_\n\n" +
+        markdown_table(["阶段", "状态", "生成时间", "报告"], rows) + "\n",
+        encoding="utf-8", newline="\n")
 
 
 def parse_ppl(text: str) -> float | None:

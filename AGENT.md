@@ -76,6 +76,11 @@ start.bat
   `wf_params_v1` / `wf_view_v1` — **do not rename these keys**, it wipes users' layouts.
 - Artifacts: models in `models/`, reports and logs in `out/`. Never commit either
   (both are git-ignored) — commits carry code, config, docs and sample data only.
+- **Stage reports**: every workflow node writes `out/reports/<stage>.md` via
+  `common.stage_report()` (Python side) or `workflowRunner.writeStageReport()` (Go side,
+  for deploy/test/run). The shared manifest is `out/reports/index.json` — keep both
+  writers in sync when renaming stages or adding nodes. The UI reads them through
+  `GET /api/reports` and `GET /api/reports/content`.
 
 ---
 

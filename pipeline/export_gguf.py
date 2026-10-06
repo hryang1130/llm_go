@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "pipeline" / "config.yaml"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import find_binary  # noqa: E402
+from common import find_binary, stage_report  # noqa: E402
 
 
 def load_config() -> dict:
@@ -100,6 +100,41 @@ def main():
     print(f"[quantize] 完成! F16 {f16_mb:.1f} MB -> {qtype} {q4_mb:.1f} MB "
           f"(压缩到 {q4_mb / f16_mb:.0%})")
     print(f"[quantize] 量化产物: {q4_path}")
+
+    # ---------- 阶段报告 (一次运行可能覆盖 export 与 quantize 两个节点) ----------
+    if args.skip_convert:
+        stage_report(
+            "quantize",
+            summary=f"用 `{qtype}` 把 F16 权重压到 **{q4_mb:.1f} MB**（原始 {f16_mb:.1f} MB，"
+                    f"压缩到 {q4_mb / f16_mb:.0%}）。",
+            metrics={
+                "量化方案": qtype,
+                "输入 (F16)": f"{f16_mb:.2f} MB",
+                "输出": f"{q4_mb:.2f} MB",
+                "压缩比": f"{q4_mb / f16_mb:.1%}",
+                "量化器": str(quantizer),
+            },
+            artifacts=[q4_path, f16_path],
+            logs=[log_path],
+            notes="这是基础链路的单方案量化。要看多方案体积/精度对比并用 imatrix 校准，"
+                  "运行「量化方案对比」节点（quantize_sweep.py）。",
+        )
+    else:
+        stage_report(
+            "export",
+            summary=f"HF 权重导出为 GGUF（F16，**{f16_mb:.1f} MB**），"
+                    f"随后量化为 {qtype}（{q4_mb:.1f} MB）。",
+            metrics={
+                "HF 目录": str(hf_dir.relative_to(ROOT).as_posix()),
+                "F16 产物": f"{f16_mb:.2f} MB",
+                "量化方案": qtype,
+                "量化产物": f"{q4_mb:.2f} MB",
+            },
+            artifacts=[f16_path, q4_path],
+            logs=[log_path],
+            notes="导出用项目自带的 `pipeline/write_gguf.py`（不用官方 convert_hf_to_gguf.py，"
+                  "因为它用哈希白名单识别分词器，认不出自训词表）。",
+        )
 
 
 if __name__ == "__main__":

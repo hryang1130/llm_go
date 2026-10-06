@@ -28,6 +28,9 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "pipeline" / "config.yaml"
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from common import markdown_table, stage_report  # noqa: E402
+
 
 def load_config() -> dict:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -200,6 +203,38 @@ def main():
     model.save_pretrained(str(output_dir))
     tokenizer.save_pretrained(str(output_dir))
     print(f"[train] 模型已保存到 {output_dir} (HF 格式, 可直接转 GGUF)")
+
+    # ---------- 阶段报告 ----------
+    used_epochs = args.epochs or tcfg["epochs"]
+    used_batch = args.batch_size or tcfg["batch_size"]
+    history = [h for h in trainer.state.log_history if "loss" in h]
+    curve = markdown_table(
+        ["step", "loss"],
+        [[h.get("step"), round(h["loss"], 4)] for h in history[::max(1, len(history) // 10)]][:12],
+    ) if history else None
+    stage_report(
+        "train_target" if is_target else "train",
+        summary=f"从零训练 {'target' if is_target else 'draft'} 模型完成，"
+                f"{mcfg['num_hidden_layers']} 层 / hidden {mcfg['hidden_size']} / "
+                f"{n_params:,} 参数，最终 loss"
+                + (f" **{final_loss:.4f}**（ppl ≈ {ppl:.2f}）。" if final_loss is not None
+                   else " 未记录。"),
+        metrics={
+            "profile": args.profile,
+            "参数量": f"{n_params:,}",
+            "层数 / hidden": f"{mcfg['num_hidden_layers']} / {mcfg['hidden_size']}",
+            "训练轮数": used_epochs,
+            "批大小": used_batch,
+            "最终 train_loss": f"{final_loss:.4f}" if final_loss is not None else "—",
+            "困惑度 (≈exp(loss))": f"{ppl:.2f}" if final_loss is not None else "—",
+            "训练设备": device,
+            "词表大小": len(tokenizer),
+        },
+        tables=[("loss 曲线（抽样）", curve)] if curve else None,
+        artifacts=[output_dir, output_dir / "model.safetensors"],
+        notes="此模型作为投机解码的 draft（或 target）使用；"
+              "若作为 target，需与 draft 共用同一分词器（训练时加 `--reuse-tokenizer`）。",
+    )
 
 
 if __name__ == "__main__":

@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import (  # noqa: E402
     ROOT, cfg_get, find_binary, load_config, markdown_table, read_log,
-    resolve_path, run, size_mb, try_find_binary, write_report,
+    resolve_path, run, size_mb, stage_report, try_find_binary, write_report,
 )
 
 DEFAULT_SCHEMES = ["Q8_0", "Q4_K_M", "Q4_K_S", "IQ4_XS"]
@@ -264,6 +264,29 @@ def main():
         "> 各方案的完整量化日志见 `out/quantize-<方案>.log`。",
     ])
     write_report(resolve_path(args.out), "量化方案对比 (imatrix 校准)", body)
+
+    ok_sizes = [r["size"] for r in results if not r.get("error") and r.get("size") == r.get("size")]
+    smallest = min(ok_sizes) if ok_sizes else float("nan")
+    stage_report(
+        "sweep",
+        summary=f"对 {f16.name} 跑完 {len(results)} 个量化方案"
+                + ("（含 imatrix 校准）" if imatrix else "（未用校准）")
+                + f"，最小的 **{smallest:.1f} MB**。",
+        metrics={
+            "输入模型": f"{f16.name} ({f16_mb:.1f} MB)",
+            "方案数": len(results),
+            "imatrix 校准": imatrix.name if imatrix else "未使用",
+            "最小体积": f"{smallest:.2f} MB" if smallest == smallest else "—",
+            "量化器": str(quantizer),
+        },
+        tables=[("体积对比", markdown_table(
+            ["方案", "体积", "相对 F16", "压缩倍数", "校准", "耗时"],
+            rows))],
+        artifacts=[r["path"] for r in results if r.get("path")] + [f16],
+        links=[("完整报告 (体积/压缩倍数/结论)", "quantize_sweep.md")],
+        notes="体积只说明能不能装下；**精度要看评测基准节点（PPL 对比）**。"
+              "带 imatrix 的 4bit 通常同体积下困惑度更低。",
+    )
 
     failed = [r["scheme"] for r in results if r.get("error")]
     if failed:

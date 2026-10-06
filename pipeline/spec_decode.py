@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import (  # noqa: E402
     ROOT, cfg_get, find_binary, http_json, http_text, load_config, markdown_table,
-    resolve_path, size_mb, supports_flag, try_find_binary, write_report,
+    resolve_path, size_mb, stage_report, supports_flag, try_find_binary, write_report,
 )
 from eval import PROMPT, Server  # noqa: E402  复用服务管理与提示词
 
@@ -261,6 +261,27 @@ def main():
     ])
     write_report(resolve_path(args.out), "投机解码实验", body)
     print("[spec] 完成")
+
+    # ---------- 阶段报告 ----------
+    stage_report(
+        "spec",
+        summary=f"draft `{draft.name}` + target `{target.name}` 的投机解码对比"
+                + (f"，解码从 {base['decode_tok_s']:.0f} 提到 **{spec['decode_tok_s']:.0f} tok/s**"
+                   f"（{speedup:.2f}×）。" if speedup else "。"),
+        metrics={
+            "draft 模型": f"{draft.name} ({size_mb(draft):.1f} MB)",
+            "target 模型": f"{target.name} ({size_mb(target):.1f} MB)",
+            "最大猜测数": draft_max,
+            "接受率": f"{spec['accept_rate']:.1%}" if spec.get("accept_rate") else "—",
+            "加速比": f"{speedup:.2f}×" if speedup else "—",
+        },
+        tables=[("对比", markdown_table(
+            ["配置", "解码(tok/s)", "TTFT(ms)", "加速比", "接受率"], rows))],
+        artifacts=[draft, target],
+        links=[("完整报告 (含调参建议)", "spec_decode.md")],
+        notes="draft 与 target **必须共用分词器**（脚本会先校验词表大小）。"
+              "接受率过低时可调小最大猜测数或提高 draft_p_min 重跑。",
+    )
 
 
 if __name__ == "__main__":

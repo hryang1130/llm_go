@@ -1,88 +1,125 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LLM 流水线编排 · 训练 → 导出 → 量化 → 部署</title>
 <style>
-  :root {
-    --bg: #0b1020;
+  /* ---------------- 主题变量 ---------------- */
+  :root[data-theme="dark"] {
+    --page: #0b1020;
     --canvas: #0d1226;
-    --panel: #121a33;
+    --grid: rgba(148,163,184,.10);
+    --surface: #111a33;
+    --surface-2: #17203c;
     --card: #ffffff;
-    --border: #e2e6ef;
-    --text: #111827;
-    --muted: #6b7280;
+    --card-text: #111827;
+    --header-bg: linear-gradient(90deg, #111834 0%, #1a1440 60%, #241546 100%);
+    --header-text: #e5e9f5;
+    --header-muted: #94a3c0;
+    --border: rgba(148,163,184,.22);
+    --border-strong: rgba(148,163,184,.38);
+    --text: #dbe2f2;
+    --muted: #8fa0c4;
     --accent: #6366f1;
     --accent-2: #8b5cf6;
+    --accent-soft: rgba(99,102,241,.18);
+    --ok: #10b981; --ok-soft: rgba(16,185,129,.16);
+    --fail: #ef4444; --fail-soft: rgba(239,68,68,.16);
+    --skip: #64748b;
+    --input-bg: rgba(11,16,32,.6);
+    --shadow: 0 10px 30px rgba(0,0,0,.35);
+    --node-card: #ffffff;
+  }
+  :root[data-theme="light"] {
+    --page: #eef1f6;
+    --canvas: #f6f8fb;
+    --grid: rgba(100,116,139,.18);
+    --surface: #ffffff;
+    --surface-2: #f4f6fb;
+    --card: #ffffff;
+    --card-text: #111827;
+    --header-bg: linear-gradient(90deg, #ffffff 0%, #f7f8ff 60%, #f3f0ff 100%);
+    --header-text: #1f2937;
+    --header-muted: #6b7280;
+    --border: #dde3ee;
+    --border-strong: #c3cbdc;
+    --text: #1f2937;
+    --muted: #6b7280;
+    --accent: #4f46e5;
+    --accent-2: #7c3aed;
     --accent-soft: #eef0ff;
-    --ok: #10b981;
-    --ok-soft: #d7f5ea;
-    --fail: #ef4444;
-    --fail-soft: #fde5e5;
-    --run: #6366f1;
+    --ok: #059669; --ok-soft: #dcfce7;
+    --fail: #dc2626; --fail-soft: #fee2e2;
     --skip: #9ca3af;
-    --grid: rgba(148,163,184,.10);
-    --header-h: 58px;
-    --footer-h: 34px;
-    --panel-w: 316px;
+    --input-bg: #ffffff;
+    --shadow: 0 6px 22px rgba(15,23,42,.10);
+    --node-card: #ffffff;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; }
   body {
     font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
-    background: var(--bg); color: var(--text); overflow: hidden;
+    background: var(--page); color: var(--text); overflow: hidden;
   }
+  :root { --header-h: 58px; --footer-h: 34px; --panel-w: 320px; }
 
-  /* ---------- 顶栏 ---------- */
+  /* ---------------- 顶栏 ---------------- */
   header {
-    height: var(--header-h); display: flex; align-items: center; gap: 14px;
-    padding: 0 18px;
-    background: linear-gradient(90deg, #111834 0%, #1a1440 60%, #241546 100%);
-    border-bottom: 1px solid rgba(148,163,184,.15);
-    color: #e5e9f5;
+    height: var(--header-h); display: flex; align-items: center; gap: 12px; padding: 0 16px;
+    background: var(--header-bg); border-bottom: 1px solid var(--border); color: var(--header-text);
   }
   .brand { display: flex; align-items: center; gap: 10px; }
   .brand .logo {
-    width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center;
-    font-size: 16px;
+    width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; font-size: 16px;
     background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
     box-shadow: 0 2px 10px rgba(99,102,241,.45);
   }
-  .brand h1 { font-size: 15px; font-weight: 700; letter-spacing: .3px; color: #fff; }
+  .brand h1 { font-size: 15px; font-weight: 700; letter-spacing: .3px; }
   .brand h1 small {
-    font-weight: 400; margin-left: 10px; font-size: 12px; color: #94a3c0;
-    padding-left: 12px; border-left: 1px solid rgba(148,163,184,.25);
+    font-weight: 400; margin-left: 10px; font-size: 12px; color: var(--header-muted);
+    padding-left: 12px; border-left: 1px solid var(--border-strong);
   }
   .spacer { flex: 1; }
 
-  #conn {
-    display: inline-flex; align-items: center; gap: 6px;
-    font-size: 12px; color: #94a3c0;
-    background: rgba(148,163,184,.12); border: 1px solid rgba(148,163,184,.2);
-    padding: 5px 12px; border-radius: 999px;
+  /* 分段切换 (画布/列表) */
+  .seg { display: flex; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 3px; }
+  .seg button {
+    border: none; background: transparent; color: var(--muted); padding: 5px 12px;
+    border-radius: 7px; font-size: 12.5px; cursor: pointer; font-weight: 600;
   }
-  #conn .dot { width: 8px; height: 8px; border-radius: 50%; background: #64748b; transition: background .3s; }
-  #conn.on { color: #a7f3d0; border-color: rgba(16,185,129,.35); background: rgba(16,185,129,.12); }
-  #conn.on .dot { background: var(--ok); box-shadow: 0 0 6px rgba(16,185,129,.8); }
+  .seg button.on { background: var(--accent); color: #fff; }
+  .seg button:not(.on):hover { color: var(--text); }
+
+  #conn {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--header-muted);
+    background: var(--surface-2); border: 1px solid var(--border); padding: 5px 12px; border-radius: 999px;
+  }
+  #conn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--skip); transition: background .3s; }
+  #conn.on { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
+  #conn.on .dot { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
 
   button {
-    border: 1px solid rgba(148,163,184,.3); background: rgba(148,163,184,.1); color: #dbe2f2;
-    padding: 7px 16px; border-radius: 9px; cursor: pointer; font-size: 13px; font-weight: 500;
-    transition: all .15s ease;
+    border: 1px solid var(--border-strong); background: var(--surface); color: var(--text);
+    padding: 7px 14px; border-radius: 9px; cursor: pointer; font-size: 13px; font-weight: 500;
+    transition: all .15s ease; white-space: nowrap;
   }
-  button:hover { border-color: var(--accent); color: #fff; background: rgba(99,102,241,.18); }
+  button:hover { border-color: var(--accent); }
   button.primary {
     background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
-    border: none; color: #fff; font-weight: 600;
-    box-shadow: 0 2px 12px rgba(99,102,241,.4);
+    border: none; color: #fff; font-weight: 600; box-shadow: 0 2px 12px rgba(99,102,241,.35);
   }
-  button.primary:hover { filter: brightness(1.1); color: #fff; }
+  button.primary:hover { filter: brightness(1.1); }
   button.danger { background: var(--fail); border: none; color: #fff; }
-  button.danger:hover { filter: brightness(1.1); color: #fff; }
-  button:disabled { opacity: .4; cursor: not-allowed; filter: none; }
+  button.ghost { background: transparent; }
+  button.icon { width: 34px; height: 34px; padding: 0; display: grid; place-items: center; font-size: 15px; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  select {
+    background: var(--surface); color: var(--text); border: 1px solid var(--border-strong);
+    border-radius: 9px; padding: 7px 10px; font-size: 13px; cursor: pointer;
+  }
 
-  /* ---------- 画布 ---------- */
+  /* ---------------- 画布 ---------------- */
   #stage {
     position: absolute; inset: var(--header-h) var(--panel-w) var(--footer-h) 0;
     overflow: hidden; cursor: grab; background: var(--canvas);
@@ -90,138 +127,196 @@
     background-size: 22px 22px;
   }
   #stage.panning { cursor: grabbing; }
-
   #viewport { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
   #edges { position: absolute; overflow: visible; pointer-events: none; }
-  #edges path { fill: none; stroke: rgba(148,163,184,.55); stroke-width: 2.5; }
-  #edges path.active {
-    stroke: var(--accent); stroke-width: 3;
-    stroke-dasharray: 8 6; animation: flow 1s linear infinite;
-  }
+  #edges path { fill: none; stroke: var(--border-strong); stroke-width: 2.5; }
+  #edges path.active { stroke: var(--accent); stroke-width: 3; stroke-dasharray: 8 6; animation: flow 1s linear infinite; }
   #edges path.done { stroke: var(--ok); }
   #edges path.temp { stroke: var(--accent); stroke-dasharray: 6 5; }
   @keyframes flow { to { stroke-dashoffset: -14; } }
 
-  /* ---------- 画布悬浮工具条 ---------- */
-  #canvas-tools {
-    position: absolute; left: 14px; bottom: 14px; display: flex; gap: 6px; z-index: 10;
-  }
+  #canvas-tools { position: absolute; left: 14px; bottom: 14px; display: flex; gap: 6px; z-index: 10; }
   #canvas-tools button {
     width: 34px; height: 34px; padding: 0; border-radius: 9px; font-size: 15px;
-    display: grid; place-items: center;
-    background: var(--panel); border: 1px solid rgba(148,163,184,.25); color: #cbd5f0;
-    box-shadow: 0 4px 14px rgba(0,0,0,.35);
+    display: grid; place-items: center; background: var(--surface); box-shadow: var(--shadow);
   }
-  #canvas-tools button:hover { border-color: var(--accent); }
   #zoom-label {
-    min-width: 34px; display: grid; place-items: center; font-size: 11px; color: #8ea0c5;
-    background: var(--panel); border: 1px solid rgba(148,163,184,.25); border-radius: 9px;
+    min-width: 40px; display: grid; place-items: center; font-size: 11px; color: var(--muted);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 9px;
   }
 
-  /* ---------- 节点 ---------- */
+  /* ---------------- 节点 ---------------- */
   .wf-node {
-    position: absolute; width: 224px; background: var(--card);
-    border: 2px solid var(--border); border-radius: 14px;
-    box-shadow: 0 2px 6px rgba(15,23,42,.10), 0 10px 28px rgba(15,23,42,.08);
-    cursor: grab; user-select: none; transition: box-shadow .15s, transform .15s;
+    position: absolute; width: 224px; background: var(--node-card);
+    border: 2px solid var(--border); border-radius: 14px; color: var(--card-text);
+    box-shadow: 0 2px 6px rgba(15,23,42,.10), 0 10px 28px rgba(15,23,42,.10);
+    cursor: grab; user-select: none; transition: box-shadow .15s;
   }
-  .wf-node:hover { border-color: var(--accent); box-shadow: 0 4px 10px rgba(99,102,241,.18), 0 12px 32px rgba(15,23,42,.12); }
+  .wf-node:hover { border-color: var(--accent); }
   .wf-node.selected { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft), 0 12px 32px rgba(99,102,241,.22); }
-  /* 可选阶段 (SFT / 评测 / 投机解码等): 虚线边框 + 「可选」标记, 默认不参与「运行全部」 */
-  .wf-node.optional { border-style: dashed; background: #fcfcff; }
+  .wf-node.optional { border-style: dashed; }
   .wf-node.optional .tag-opt {
     font-size: 10px; padding: 2px 8px; border-radius: 999px; font-weight: 600;
     background: linear-gradient(135deg, #ede9fe, #e0e7ff); color: #7c3aed;
   }
-  .wf-node.st-running { border-color: var(--run); animation: pulse 1.4s infinite; }
+  .wf-node.st-running { border-color: var(--accent); animation: pulse 1.4s infinite; }
   .wf-node.st-success { border-color: var(--ok); }
   .wf-node.st-failed  { border-color: var(--fail); }
-  .wf-node.st-skipped { opacity: .45; filter: saturate(.4); }
+  .wf-node.st-skipped { opacity: .5; filter: saturate(.4); }
   @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(99,102,241,.35);} 50% { box-shadow: 0 0 0 10px rgba(99,102,241,0);} }
-
   .wf-node .head { display: flex; align-items: center; gap: 9px; padding: 11px 12px 4px; }
   .wf-node .head .icon {
     width: 30px; height: 30px; border-radius: 9px; font-size: 15px; flex: none;
-    display: grid; place-items: center; background: var(--tint, #eef0ff);
+    display: grid; place-items: center;
   }
-  .wf-node .head .title { font-size: 13px; font-weight: 700; color: var(--text); }
+  .wf-node .head .title { font-size: 13px; font-weight: 700; line-height: 1.25; }
   .wf-node .head .badge {
     margin-left: auto; font-size: 10.5px; font-weight: 600; padding: 2px 9px; border-radius: 999px;
-    background: #f1f3f8; color: var(--muted); white-space: nowrap;
+    background: #f1f3f8; color: #6b7280; white-space: nowrap;
   }
   .wf-node.st-running .badge { background: var(--accent-soft); color: var(--accent); }
-  .wf-node.st-success .badge { background: var(--ok-soft); color: #047857; }
-  .wf-node.st-failed  .badge { background: var(--fail-soft); color: #b91c1c; }
-  .wf-node .desc { padding: 2px 12px 10px 51px; font-size: 11px; color: var(--muted); line-height: 1.55; }
-
+  .wf-node.st-success .badge { background: var(--ok-soft); color: var(--ok); }
+  .wf-node.st-failed  .badge { background: var(--fail-soft); color: var(--fail); }
+  .wf-node .desc { padding: 2px 12px 8px 51px; font-size: 11px; color: #6b7280; line-height: 1.55; }
+  .wf-node .foot { display: flex; gap: 6px; padding: 0 12px 10px 51px; }
+  .wf-node .foot button {
+    font-size: 10.5px; padding: 3px 9px; border-radius: 7px; background: #f4f6fb;
+    border: 1px solid var(--border); color: #4b5563;
+  }
+  .wf-node .foot button.has-report { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
   .wf-node .logs {
     display: none; margin: 0 9px 10px; max-height: 132px; overflow-y: auto;
-    background: #0b1120; color: #86efac; border-radius: 9px;
-    border: 1px solid rgba(99,102,241,.2);
+    background: #0b1120; color: #86efac; border-radius: 9px; border: 1px solid rgba(99,102,241,.2);
     font: 10.5px/1.6 Consolas, "Cascadia Mono", monospace; padding: 7px 9px;
     white-space: pre-wrap; word-break: break-all;
   }
   .wf-node .logs::-webkit-scrollbar { width: 6px; }
   .wf-node .logs::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
   .wf-node .logs.show { display: block; }
-
   .dot-in, .dot-out {
     position: absolute; top: 25px; width: 13px; height: 13px; border-radius: 50%;
-    background: #fff; border: 2.5px solid var(--accent); cursor: crosshair; z-index: 2;
+    background: var(--node-card); border: 2.5px solid var(--accent); cursor: crosshair; z-index: 2;
     box-shadow: 0 0 0 3px rgba(99,102,241,.12); transition: transform .12s;
   }
-  .dot-in { left: -7.5px; }
-  .dot-out { right: -7.5px; }
-  .dot-in:hover, .dot-out:hover { transform: scale(1.35); box-shadow: 0 0 0 5px rgba(99,102,241,.2); }
+  .dot-in { left: -7.5px; } .dot-out { right: -7.5px; }
+  .dot-in:hover, .dot-out:hover { transform: scale(1.35); }
 
-  /* ---------- 参数面板 ---------- */
+  /* ---------------- 列表视图 ---------------- */
+  #list-view {
+    position: absolute; inset: var(--header-h) var(--panel-w) var(--footer-h) 0;
+    background: var(--page); overflow-y: auto; padding: 20px 24px 40px; display: none;
+  }
+  #list-view.on { display: block; }
+  #list-view h2 { font-size: 15px; margin-bottom: 4px; }
+  #list-view .hint { font-size: 12px; color: var(--muted); margin-bottom: 16px; line-height: 1.7; }
+  .stage-row {
+    display: flex; align-items: center; gap: 12px; padding: 12px 14px; margin-bottom: 8px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    box-shadow: var(--shadow);
+  }
+  .stage-row.off { opacity: .5; }
+  .stage-row .idx {
+    width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center;
+    font-size: 12px; font-weight: 700; background: var(--accent-soft); color: var(--accent); flex: none;
+  }
+  .stage-row.optional .idx { background: var(--surface-2); color: var(--muted); }
+  .stage-row .info { flex: 1; min-width: 0; }
+  .stage-row .name { font-size: 13.5px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .stage-row .sub { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+  .stage-row .st {
+    font-size: 11px; padding: 2px 9px; border-radius: 999px; background: var(--surface-2);
+    color: var(--muted); font-weight: 600;
+  }
+  .stage-row .st.st-running { background: var(--accent-soft); color: var(--accent); }
+  .stage-row .st.st-success { background: var(--ok-soft); color: var(--ok); }
+  .stage-row .st.st-failed { background: var(--fail-soft); color: var(--fail); }
+  .stage-row .ops { display: flex; gap: 6px; align-items: center; }
+  .stage-row .ops button { padding: 5px 9px; font-size: 12px; }
+  .stage-row label.switch { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
+  .preset-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; flex-wrap: wrap; }
+  .preset-bar .chip {
+    font-size: 12px; padding: 6px 12px; border-radius: 999px; border: 1px dashed var(--border-strong);
+    background: var(--surface); cursor: pointer; color: var(--text);
+  }
+  .preset-bar .chip:hover { border-color: var(--accent); color: var(--accent); border-style: solid; }
+  .section-title { font-size: 12px; color: var(--muted); margin: 22px 0 10px; font-weight: 600; letter-spacing: .4px; }
+
+  /* ---------------- 参数面板 ---------------- */
   #panel {
     position: absolute; top: var(--header-h); right: 0; bottom: var(--footer-h); width: var(--panel-w);
-    background: var(--panel); border-left: 1px solid rgba(148,163,184,.18);
-    padding: 18px 16px; overflow-y: auto; color: #dbe2f2;
+    background: var(--surface); border-left: 1px solid var(--border); padding: 18px 16px;
+    overflow-y: auto;
   }
-  #panel::-webkit-scrollbar { width: 6px; }
-  #panel::-webkit-scrollbar-thumb { background: rgba(148,163,184,.3); border-radius: 3px; }
-  #panel h2 { font-size: 15px; color: #fff; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
-  #panel h2 .p-icon {
-    width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; font-size: 14px;
-    background: rgba(99,102,241,.2);
-  }
-  #panel .desc { font-size: 12px; color: #94a3c0; margin-bottom: 16px; line-height: 1.65;
-    padding-bottom: 12px; border-bottom: 1px dashed rgba(148,163,184,.2); }
+  #panel h2 { font-size: 15px; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+  #panel h2 .p-icon { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; font-size: 14px; background: var(--accent-soft); }
+  #panel .desc { font-size: 12px; color: var(--muted); margin-bottom: 16px; line-height: 1.65; padding-bottom: 12px; border-bottom: 1px dashed var(--border); }
   #panel .field { margin-bottom: 13px; }
-  #panel label { display: block; font-size: 11.5px; color: #94a3c0; margin-bottom: 5px; font-weight: 500; }
+  #panel label { display: block; font-size: 11.5px; color: var(--muted); margin-bottom: 5px; font-weight: 500; }
   #panel input {
-    width: 100%; padding: 8px 11px; border: 1px solid rgba(148,163,184,.28); border-radius: 9px;
-    font-size: 13px; outline: none; color: #fff; background: rgba(11,16,32,.6);
-    transition: border-color .15s, box-shadow .15s;
+    width: 100%; padding: 8px 11px; border: 1px solid var(--border-strong); border-radius: 9px;
+    font-size: 13px; outline: none; color: var(--text); background: var(--input-bg);
   }
-  #panel input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(99,102,241,.22); }
-  #panel .empty { color: #7d8db4; font-size: 12.5px; text-align: center; margin-top: 70px; line-height: 2.2; }
+  #panel input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  #panel .empty { color: var(--muted); font-size: 12.5px; text-align: center; margin-top: 60px; line-height: 2.2; }
   #panel .empty .big { font-size: 30px; display: block; margin-bottom: 6px; opacity: .7; }
   #panel .actions { margin-top: 20px; display: flex; flex-direction: column; gap: 8px; }
-  #panel .actions button { padding: 9px 16px; border-radius: 10px; }
-  #panel .actions .ghost-danger { border-color: rgba(239,68,68,.4); color: #fca5a5; background: rgba(239,68,68,.08); }
-  #panel .actions .ghost-danger:hover { border-color: var(--fail); color: #fff; background: rgba(239,68,68,.2); }
+  #panel .actions .ghost-danger { border-color: var(--fail); color: var(--fail); background: transparent; }
 
-  /* ---------- 底部状态栏 ---------- */
+  /* ---------------- 报告抽屉 ---------------- */
+  #drawer {
+    position: absolute; top: var(--header-h); right: 0; bottom: var(--footer-h); width: 620px; max-width: 92vw;
+    background: var(--surface); border-left: 1px solid var(--border); box-shadow: var(--shadow);
+    transform: translateX(102%); transition: transform .25s ease; z-index: 30; display: flex; flex-direction: column;
+  }
+  #drawer.on { transform: translateX(0); }
+  #drawer .dhead {
+    display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--border);
+  }
+  #drawer .dhead h2 { font-size: 14px; }
+  #drawer .dbody { flex: 1; overflow: hidden; display: flex; }
+  #report-list { width: 210px; border-right: 1px solid var(--border); overflow-y: auto; padding: 8px; flex: none; }
+  #report-list .item {
+    padding: 9px 10px; border-radius: 9px; cursor: pointer; margin-bottom: 4px; font-size: 12.5px;
+    color: var(--text); border: 1px solid transparent;
+  }
+  #report-list .item:hover { background: var(--surface-2); }
+  #report-list .item.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  #report-list .item .t { font-size: 11px; color: var(--muted); margin-top: 3px; font-weight: 400; }
+  #report-body { flex: 1; overflow-y: auto; padding: 18px 22px 60px; font-size: 13.5px; line-height: 1.75; }
+  #report-body h1 { font-size: 19px; margin: 0 0 10px; }
+  #report-body h2 { font-size: 15px; margin: 20px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--border); }
+  #report-body h3 { font-size: 13.5px; margin: 14px 0 6px; }
+  #report-body p { margin: 8px 0; }
+  #report-body ul { margin: 8px 0 8px 20px; }
+  #report-body li { margin: 3px 0; }
+  #report-body code { background: var(--surface-2); padding: 1px 5px; border-radius: 5px; font-size: 12.5px; }
+  #report-body pre {
+    background: #0b1120; color: #cbd5f0; padding: 10px 12px; border-radius: 9px; overflow-x: auto;
+    font: 12px/1.6 Consolas, monospace; margin: 10px 0;
+  }
+  #report-body pre code { background: none; color: inherit; padding: 0; }
+  #report-body table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 12.5px; }
+  #report-body th, #report-body td { border: 1px solid var(--border); padding: 6px 9px; text-align: left; }
+  #report-body th { background: var(--surface-2); font-weight: 600; }
+  #report-body blockquote {
+    border-left: 3px solid var(--accent); padding: 4px 12px; margin: 10px 0; color: var(--muted);
+    background: var(--surface-2); border-radius: 0 8px 8px 0;
+  }
+
+  /* ---------------- 底部 ---------------- */
   footer {
     position: absolute; left: 0; right: 0; bottom: 0; height: var(--footer-h);
-    background: var(--panel); border-top: 1px solid rgba(148,163,184,.18);
-    display: flex; align-items: center; padding: 0 16px; font-size: 12px; color: #94a3c0; gap: 14px;
+    background: var(--surface); border-top: 1px solid var(--border);
+    display: flex; align-items: center; padding: 0 16px; font-size: 12px; color: var(--muted); gap: 14px;
   }
-  #status-text { font-weight: 500; }
-  footer .progress {
-    width: 200px; height: 5px; border-radius: 999px; background: rgba(148,163,184,.18); overflow: hidden;
-  }
+  footer .progress { width: 180px; height: 5px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
   footer .progress > div {
     height: 100%; width: 0%; border-radius: 999px;
-    background: linear-gradient(90deg, var(--accent), var(--accent-2));
-    transition: width .4s ease;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .4s ease;
   }
   footer .legend span::before { content: "●"; margin: 0 4px 0 12px; font-size: 9px; }
-  .lg-idle::before { color: #64748b; } .lg-run::before { color: var(--run); }
-  .lg-ok::before { color: var(--ok); } .lg-fail::before { color: var(--fail); } .lg-skip::before { color: var(--skip); }
+  .lg-idle::before { color: var(--skip); } .lg-run::before { color: var(--accent); }
+  .lg-ok::before { color: var(--ok); } .lg-fail::before { color: var(--fail); }
 </style>
 </head>
 <body>
@@ -231,11 +326,19 @@
     <div class="logo">⚙</div>
     <h1>LLM 流水线编排<small>训练 → 导出 GGUF → 量化 → 部署</small></h1>
   </div>
+
+  <div class="seg" id="view-seg">
+    <button id="btn-canvas" class="on">画布</button>
+    <button id="btn-list">列表</button>
+  </div>
+
   <div class="spacer"></div>
   <span id="conn"><span class="dot"></span>未连接</span>
+  <button id="btn-reports" class="icon" title="查看各阶段报告">📄</button>
+  <button id="btn-theme" class="icon" title="切换日夜主题">🌙</button>
+  <button id="btn-reset">↺ 默认布局</button>
   <button id="btn-run" class="primary">▶ 运行全部</button>
   <button id="btn-stop" disabled>■ 停止</button>
-  <button id="btn-reset">↺ 默认布局</button>
 </header>
 
 <div id="stage">
@@ -251,7 +354,22 @@
   </div>
 </div>
 
-<div id="panel"><div class="empty"><span class="big">◇</span>点击节点查看 / 编辑参数<br>拖拽节点右侧圆点连接到下一节点<br>拖拽空白处平移 · 滚轮缩放</div></div>
+<div id="list-view"></div>
+
+<div id="panel"><div class="empty"><span class="big">◇</span>点击节点查看 / 编辑参数<br>或切到「列表」视图按顺序编排</div></div>
+
+<div id="drawer">
+  <div class="dhead">
+    <h2>阶段报告</h2>
+    <span class="spacer"></span>
+    <button id="btn-refresh-reports" class="icon" title="刷新">↻</button>
+    <button id="btn-close-drawer" class="icon" title="关闭">✕</button>
+  </div>
+  <div class="dbody">
+    <div id="report-list"></div>
+    <div id="report-body"><p style="color:var(--muted)">选择左侧报告查看。每个阶段跑完都会写一份 Markdown 报告到 <code>out/reports/</code>。</p></div>
+  </div>
+</div>
 
 <footer>
   <span id="status-text">就绪</span>
@@ -259,33 +377,30 @@
   <span class="spacer"></span>
   <span class="legend">
     <span class="lg-idle">待运行</span><span class="lg-run">运行中</span>
-    <span class="lg-ok">成功</span><span class="lg-fail">失败</span><span class="lg-skip">跳过</span>
+    <span class="lg-ok">成功</span><span class="lg-fail">失败</span>
   </span>
 </footer>
 
 <script>
 "use strict";
-const API = {
-  workflow: "/api/workflow",
-  run: "/api/run",
-  cancel: "/api/cancel",
-  health: "/healthz",
-};
+const API = { workflow: "/api/workflow", run: "/api/run", cancel: "/api/cancel",
+              health: "/healthz", reports: "/api/reports", reportContent: "/api/reports/content" };
 
 let def = null;            // {nodes, edges}
-let positions = {};        // id -> {x,y} (视口坐标)
+let positions = {};        // id -> {x,y}
 let params = {};           // "node.key" -> value
 let statuses = {};         // id -> idle|running|success|failed|skipped
+let reports = {};          // id -> 报告文件名
 let selected = null;
 let running = false;
 let view = { x: 20, y: 20, scale: 1 };
 
-// DOM
 const stage = document.getElementById("stage");
 const viewport = document.getElementById("viewport");
 const nodesEl = document.getElementById("nodes");
 const edgesEl = document.getElementById("edges");
 const panel = document.getElementById("panel");
+const listView = document.getElementById("list-view");
 const statusText = document.getElementById("status-text");
 const progressBar = document.getElementById("progress-bar");
 const btnRun = document.getElementById("btn-run");
@@ -293,36 +408,59 @@ const btnStop = document.getElementById("btn-stop");
 const btnReset = document.getElementById("btn-reset");
 const connEl = document.getElementById("conn");
 const zoomLabel = document.getElementById("zoom-label");
+const drawer = document.getElementById("drawer");
+const reportList = document.getElementById("report-list");
+const reportBody = document.getElementById("report-body");
 
 const NODE_W = 224, ANCHOR_Y = 26;
-
-// 节点主题色 (按节点 id 顺序循环): 图标底色
-const TINTS = [
-  ["#e0e7ff", "#4338ca"], ["#d1fae5", "#047857"], ["#fef3c7", "#b45309"],
-  ["#fce7f3", "#be185d"], ["#cffafe", "#0e7490"], ["#ede9fe", "#6d28d9"],
-  ["#ffedd5", "#c2410c"], ["#dcfce7", "#15803d"],
-];
+const TINTS = [["#e0e7ff","#4338ca"],["#d1fae5","#047857"],["#fef3c7","#b45309"],["#fce7f3","#be185d"],
+               ["#cffafe","#0e7490"],["#ede9fe","#6d28d9"],["#ffedd5","#c2410c"],["#dcfce7","#15803d"]];
 function tintOf(id, idx) {
-  // 优先按语义匹配, 否则按顺序循环
-  const map = { train: 0, sft: 4, export: 1, quantize: 2, eval: 3, spec: 5, serve: 6, smoke: 7 };
-  for (const k in map) if (id.includes(k)) return TINTS[map[k]];
+  const map = { train_target: 5, train: 0, sft: 4, export: 1, quantize: 2, sweep: 2, eval: 3, spec: 5, deploy: 6, test: 7, data: 7 };
+  for (const k in map) if (id === k) return TINTS[map[k]];
   return TINTS[idx % TINTS.length];
 }
 
+// ---------- 预设: 一键切换"跑哪些阶段" ----------
+const PRESETS = [
+  { id: "quick", name: "⚡ 快速跑通", desc: "基础链路：数据 → 训练 → 导出 → 量化 → 部署 → 冒烟",
+    order: ["data","train","export","quantize","deploy","test"] },
+  { id: "full", name: "🧪 完整实验", desc: "基础链路 + target 训练 + LoRA + 量化对比 + 评测 + 投机解码",
+    order: ["data","train","export","quantize","deploy","test","train_target","sft","sweep","eval","spec"] },
+  { id: "accuracy", name: "🎯 精度优先", desc: "训练导出量化后先做 imatrix 多方案对比与 PPL 评测",
+    order: ["data","train","export","quantize","sweep","eval","deploy","test"] },
+  { id: "speed", name: "🚀 端侧速度", desc: "量化部署后做评测与投机解码加速实验",
+    order: ["data","train","export","quantize","deploy","test","eval","spec"] },
+  { id: "custom", name: "✏️ 自定义", desc: "在列表视图里自由勾选与排序", order: null },
+];
+
 // ---------- localStorage ----------
-const LS = { pos: "wf_pos_v1", edge: "wf_edges_v1", param: "wf_params_v1", view: "wf_view_v1" };
+const LS = { pos: "wf_pos_v1", edge: "wf_edges_v1", param: "wf_params_v1", view: "wf_view_v1",
+             theme: "wf_theme_v1", mode: "wf_mode_v1", enabled: "wf_enabled_v1" };
+let savedEdges = null, enabled = {}, mode = "canvas";
+
 function loadLS() {
   try { positions = JSON.parse(localStorage.getItem(LS.pos)) || {}; } catch (e) { positions = {}; }
   try { savedEdges = JSON.parse(localStorage.getItem(LS.edge)) || null; } catch (e) { savedEdges = null; }
   try { params = JSON.parse(localStorage.getItem(LS.param)) || {}; } catch (e) { params = {}; }
+  try { enabled = JSON.parse(localStorage.getItem(LS.enabled)) || {}; } catch (e) { enabled = {}; }
   try { const v = JSON.parse(localStorage.getItem(LS.view)); if (v) view = v; } catch (e) {}
+  mode = localStorage.getItem(LS.mode) || "canvas";
+  const theme = localStorage.getItem(LS.theme) || "dark";
+  applyTheme(theme);
 }
-let savedEdges = null;
 function saveLS() {
   localStorage.setItem(LS.pos, JSON.stringify(positions));
   localStorage.setItem(LS.edge, JSON.stringify(def.edges));
   localStorage.setItem(LS.param, JSON.stringify(params));
   localStorage.setItem(LS.view, JSON.stringify(view));
+  localStorage.setItem(LS.enabled, JSON.stringify(enabled));
+}
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  document.getElementById("btn-theme").textContent = theme === "dark" ? "🌙" : "☀️";
+  localStorage.setItem(LS.theme, theme);
 }
 
 // ---------- 初始化 ----------
@@ -339,11 +477,14 @@ async function init() {
     });
     statuses[n.id] = "idle";
     n._tint = tintOf(n.id, i);
+    if (!(n.id in enabled)) enabled[n.id] = !n.optional;   // 可选阶段默认不参与
   });
   buildNodes();
   renderEdges();
   applyView();
+  setMode(mode);
   pollHealth();
+  refreshReports(true);
 }
 
 function pollHealth() {
@@ -357,7 +498,7 @@ function pollHealth() {
   setTimeout(pollHealth, 5000);
 }
 
-// ---------- 节点渲染 ----------
+// ---------- 画布节点 ----------
 function buildNodes() {
   nodesEl.innerHTML = "";
   def.nodes.forEach(n => {
@@ -368,43 +509,53 @@ function buildNodes() {
       '<div class="head">' +
         '<span class="icon" style="background:' + n._tint[0] + '">' + n.icon + '</span>' +
         '<span class="title">' + n.label + '</span>' +
-        (n.optional ? '<span class="tag-opt">可选</span>' : '') +
-        '<span class="badge">待运行</span></div>' +
+        (n.optional ? '<span class="tag-opt">可选</span>' : '<span class="badge">待运行</span>') +
+        (n.optional ? '<span class="badge">待运行</span>' : '') +
+      '</div>' +
       '<div class="desc">' + n.desc + '</div>' +
+      '<div class="foot"><button data-run="' + n.id + '">▶ 运行</button>' +
+        '<button data-report="' + n.id + '" style="display:none">📄 报告</button></div>' +
       '<div class="logs"></div>' +
       '<div class="dot-in" data-node="' + n.id + '"></div>' +
       '<div class="dot-out" data-node="' + n.id + '"></div>';
     el.style.left = positions[n.id].x + "px";
     el.style.top = positions[n.id].y + "px";
     el.addEventListener("mousedown", e => {
-      if (e.target.classList.contains("dot-in") || e.target.classList.contains("dot-out")) return;
+      if (e.target.closest(".dot-in") || e.target.closest(".dot-out") || e.target.closest("button")) return;
       selectNode(n.id);
       startDragNode(e, n.id);
     });
-    el.querySelector(".dot-out").addEventListener("mousedown", e => {
-      e.stopPropagation();
-      startConnect(e, n.id);
-    });
+    el.querySelector(".dot-out").addEventListener("mousedown", e => { e.stopPropagation(); startConnect(e, n.id); });
+    el.querySelector('[data-run]').addEventListener("click", e => { e.stopPropagation(); runWorkflow([n.id]); });
+    el.querySelector('[data-report]').addEventListener("click", e => { e.stopPropagation(); openReport(reports[n.id]); });
     nodesEl.appendChild(el);
   });
 }
 
 function setNodeStatus(id, st) {
   statuses[id] = st;
+  const node = def.nodes.find(x => x.id === id);
   const el = document.getElementById("node-" + id);
-  if (!el) return;
-  el.className = "wf-node" + (def.nodes.find(x => x.id === id).optional ? " optional" : "");
-  if (selected === id) el.classList.add("selected");
-  if (st !== "idle") el.classList.add("st-" + st);
-  const badge = el.querySelector(".badge");
-  badge.textContent = { idle: "待运行", running: "运行中…", success: "✓ 成功", failed: "✗ 失败", skipped: "已跳过" }[st] || st;
-  // 边高亮: 前驱成功 -> active
+  if (el) {
+    el.className = "wf-node" + (node && node.optional ? " optional" : "");
+    if (selected === id) el.classList.add("selected");
+    if (st !== "idle") el.classList.add("st-" + st);
+    const badge = el.querySelector(".badge");
+    if (badge) badge.textContent = { idle: "待运行", running: "运行中…", success: "✓ 成功",
+                                     failed: "✗ 失败", skipped: "已跳过" }[st] || st;
+  }
   renderEdges();
+  if (listView.classList.contains("on")) renderList();
 }
 
-function nodeLogs(id) {
-  return document.querySelector("#node-" + id + " .logs");
+function setNodeReport(id, file) {
+  reports[id] = file;
+  const btn = document.querySelector('#node-' + id + ' [data-report]');
+  if (btn) { btn.style.display = ""; btn.classList.add("has-report"); }
+  if (listView.classList.contains("on")) renderList();
 }
+
+function nodeLogs(id) { return document.querySelector("#node-" + id + " .logs"); }
 function appendLog(id, line) {
   const box = nodeLogs(id);
   if (!box) return;
@@ -416,41 +567,36 @@ function appendLog(id, line) {
   box.scrollTop = box.scrollHeight;
 }
 
-// ---------- 边渲染 ----------
-function anchorOut(id) {
-  const p = positions[id];
-  return { x: p.x + NODE_W + 6, y: p.y + ANCHOR_Y };
-}
-function anchorIn(id) {
-  const p = positions[id];
-  return { x: p.x - 6, y: p.y + ANCHOR_Y };
-}
+// ---------- 边 ----------
+function anchorOut(id) { const p = positions[id]; return { x: p.x + NODE_W + 6, y: p.y + ANCHOR_Y }; }
+function anchorIn(id)  { const p = positions[id]; return { x: p.x - 6, y: p.y + ANCHOR_Y }; }
 function edgePath(a, b) {
   const dx = Math.max(40, (b.x - a.x) * 0.5);
   return `M ${a.x} ${a.y} C ${a.x + dx} ${a.y}, ${b.x - dx} ${b.y}, ${b.x} ${b.y}`;
 }
 function renderEdges() {
   let html =
-    '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">' +
-    '<path d="M 0 1 L 10 5 L 0 9 z" fill="rgba(148,163,184,.7)"/></marker>' +
+    '<defs>' +
+    '<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">' +
+    '<path d="M 0 1 L 10 5 L 0 9 z" fill="currentColor" opacity=".55"/></marker>' +
     '<marker id="arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">' +
     '<path d="M 0 1 L 10 5 L 0 9 z" fill="#10b981"/></marker></defs>';
   def.edges.forEach(e => {
-    let cls = "", mark = "";
-    if (statuses[e.to] === "running") { cls = statuses[e.from] === "success" ? "active" : ""; }
+    if (!positions[e.from] || !positions[e.to]) return;
+    let cls = "", mark = ' marker-end="url(#arrow)"';
+    if (statuses[e.to] === "running") cls = statuses[e.from] === "success" ? "active" : "";
     else if (statuses[e.to] === "success" || statuses[e.to] === "failed") { cls = "done"; mark = ' marker-end="url(#arrow-ok)"'; }
-    else mark = ' marker-end="url(#arrow)"';
     html += `<path class="${cls}" d="${edgePath(anchorOut(e.from), anchorIn(e.to))}"${mark}/>`;
   });
   if (tempEdge) html += `<path class="temp" d="${tempEdge}"/>`;
   edgesEl.innerHTML = html;
   edgesEl.setAttribute("width", 4000);
   edgesEl.setAttribute("height", 2400);
-  edgesEl.style.position = "absolute";
+  edgesEl.style.color = "var(--border-strong)";
 }
 
-// ---------- 拖拽节点 ----------
-let dragging = null;
+// ---------- 拖拽 / 连线 / 平移缩放 ----------
+let dragging = null, connecting = null, tempEdge = null;
 function startDragNode(e, id) {
   e.preventDefault();
   const pt = toWorld(e.clientX, e.clientY);
@@ -461,10 +607,6 @@ function toWorld(cx, cy) {
   const rect = stage.getBoundingClientRect();
   return { x: (cx - rect.left - view.x) / view.scale, y: (cy - rect.top - view.y) / view.scale };
 }
-
-// ---------- 连线 ----------
-let connecting = null;   // 起始节点 id
-let tempEdge = null;
 function startConnect(e, fromId) {
   e.preventDefault();
   connecting = fromId;
@@ -484,9 +626,8 @@ function finishConnect(e) {
   }
   connecting = null; tempEdge = null;
   renderEdges();
+  if (listView.classList.contains("on")) renderList();
 }
-
-// ---------- 画布平移/缩放 ----------
 stage.addEventListener("mousedown", e => {
   if (e.target === stage || e.target === viewport || e.target === edgesEl || e.target === nodesEl) {
     selectNode(null);
@@ -503,9 +644,8 @@ window.addEventListener("mousemove", e => {
     el.style.top = positions[dragging.id].y + "px";
     renderEdges();
   } else if (connecting) {
-    const a = anchorOut(connecting);
     const pt = toWorld(e.clientX, e.clientY);
-    tempEdge = edgePath(a, { x: pt.x, y: pt.y });
+    tempEdge = edgePath(anchorOut(connecting), { x: pt.x, y: pt.y });
     renderEdges();
   } else if (stage._pan) {
     view.x = e.clientX - stage._pan.x;
@@ -532,13 +672,10 @@ stage.addEventListener("wheel", e => {
 }, { passive: false });
 function applyView() {
   viewport.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale})`;
-  // 网格背景跟随视口移动, 缩放同步网格间距
   stage.style.backgroundPosition = `${view.x}px ${view.y}px`;
   stage.style.backgroundSize = `${22 * view.scale}px ${22 * view.scale}px`;
   zoomLabel.textContent = Math.round(view.scale * 100) + "%";
 }
-
-// ---------- 缩放工具条 ----------
 function zoomBy(factor) {
   const rect = stage.getBoundingClientRect();
   const mx = rect.width / 2, my = rect.height / 2;
@@ -550,13 +687,14 @@ function zoomBy(factor) {
 }
 document.getElementById("zoom-in").addEventListener("click", () => zoomBy(1.2));
 document.getElementById("zoom-out").addEventListener("click", () => zoomBy(1 / 1.2));
-document.getElementById("fit-view").addEventListener("click", () => {
+document.getElementById("fit-view").addEventListener("click", fitView);
+function fitView() {
   const ids = Object.keys(positions);
   if (!ids.length) return;
   let minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
   ids.forEach(id => {
     minX = Math.min(minX, positions[id].x); minY = Math.min(minY, positions[id].y);
-    maxX = Math.max(maxX, positions[id].x + NODE_W + 60); maxY = Math.max(maxY, positions[id].y + 160);
+    maxX = Math.max(maxX, positions[id].x + NODE_W + 60); maxY = Math.max(maxY, positions[id].y + 170);
   });
   const rect = stage.getBoundingClientRect();
   const pad = 40;
@@ -565,7 +703,7 @@ document.getElementById("fit-view").addEventListener("click", () => {
   view.x = (rect.width - (maxX - minX) * scale) / 2 - minX * scale;
   view.y = (rect.height - (maxY - minY) * scale) / 2 - minY * scale;
   applyView(); saveLS();
-});
+}
 
 // ---------- 参数面板 ----------
 function selectNode(id) {
@@ -574,7 +712,8 @@ function selectNode(id) {
   if (!id) { renderPanelEmpty(); renderEdges(); return; }
   document.getElementById("node-" + id).classList.add("selected");
   const n = def.nodes.find(x => x.id === id);
-  let html = `<h2><span class="p-icon" style="background:${n._tint[0]}">${n.icon}</span>${n.label}</h2><div class="desc">${n.desc}</div>`;
+  let html = `<h2><span class="p-icon" style="background:${n._tint[0]}">${n.icon}</span>${n.label}</h2>` +
+             `<div class="desc">${n.desc}</div>`;
   n.params.forEach(p => {
     const k = n.id + "." + p.key;
     html += `<div class="field"><label>${p.label}</label>` +
@@ -582,49 +721,274 @@ function selectNode(id) {
   });
   html += `<div class="actions">` +
     `<button class="primary" onclick="runOnly('${n.id}')">▶ 仅运行此节点</button>` +
+    `<button onclick="openReport(reports['${n.id}'])">📄 查看阶段报告</button>` +
     `<button class="ghost-danger" onclick="deleteEdgesOf('${n.id}')">✂ 删除相关连线</button></div>`;
   panel.innerHTML = html;
   panel.querySelectorAll("input").forEach(inp => {
-    inp.addEventListener("change", () => {
-      params[inp.dataset.key] = inp.value;
-      saveLS();
-    });
+    inp.addEventListener("change", () => { params[inp.dataset.key] = inp.value; saveLS(); });
   });
 }
 function renderPanelEmpty() {
-  panel.innerHTML = '<div class="empty"><span class="big">◇</span>点击节点查看 / 编辑参数<br>拖拽节点右侧圆点连接到下一节点<br>拖拽空白处平移 · 滚轮缩放</div>';
+  panel.innerHTML = '<div class="empty"><span class="big">◇</span>点击节点查看 / 编辑参数<br>' +
+    '或切到「列表」视图按顺序编排</div>';
 }
 function deleteEdgesOf(id) {
   def.edges = def.edges.filter(e => e.from !== id && e.to !== id);
   saveLS(); renderEdges();
+  if (listView.classList.contains("on")) renderList();
 }
 function escapeHtml(s) {
-  return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+  return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+
+// ---------- 视图切换 ----------
+function setMode(m) {
+  mode = m;
+  localStorage.setItem(LS.mode, m);
+  document.getElementById("btn-canvas").classList.toggle("on", m === "canvas");
+  document.getElementById("btn-list").classList.toggle("on", m === "list");
+  stage.style.display = m === "canvas" ? "" : "none";
+  listView.classList.toggle("on", m === "list");
+  if (m === "list") renderList();
+}
+document.getElementById("btn-canvas").addEventListener("click", () => setMode("canvas"));
+document.getElementById("btn-list").addEventListener("click", () => setMode("list"));
+
+// ---------- 列表视图 (友好编排: 勾选 + 上下移动 + 预设) ----------
+function chainOrder() {
+  // 从 edges 推主线顺序 (拓扑), 孤立节点按默认 x 排序追加
+  const indeg = {}, adj = {};
+  def.nodes.forEach(n => { indeg[n.id] = 0; });
+  def.edges.forEach(e => { (adj[e.from] = adj[e.from] || []).push(e.to); indeg[e.to] = (indeg[e.to] || 0) + 1; });
+  const q = def.nodes.filter(n => !indeg[n.id]).map(n => n.id);
+  const out = [];
+  while (q.length) {
+    const id = q.shift();
+    out.push(id);
+    (adj[id] || []).forEach(t => { if (--indeg[t] === 0) q.push(t); });
+  }
+  def.nodes.forEach(n => { if (!out.includes(n.id)) out.push(n.id); });
+  return out;
+}
+function relinearize(order) {
+  const on = order.filter(id => enabled[id] !== false && !isOptional(id));
+  def.edges = on.slice(0, -1).map((id, i) => ({ from: id, to: on[i + 1] }));
+  saveLS(); renderEdges();
+}
+function isOptional(id) { const n = def.nodes.find(x => x.id === id); return !!(n && n.optional); }
+
+function renderList() {
+  const order = chainOrder();
+  let html = `<h2>按顺序编排</h2>
+    <div class="hint">勾选要参与「▶ 运行全部」的阶段，用 ↑ ↓ 调整先后顺序（会按勾选项重连成一条主线）。
+      可选阶段默认不参与一键运行；单独点「▶ 运行」只跑该节点及其前驱。</div>
+    <div class="preset-bar"><span style="font-size:12px;color:var(--muted)">预设：</span>` +
+    PRESETS.map(p => `<span class="chip" data-preset="${p.id}" title="${p.desc}">${p.name}</span>`).join("") +
+    `</div>`;
+
+  const main = order.filter(id => !isOptional(id));
+  const opt  = order.filter(id => isOptional(id));
+  const row = (id, i, list, optional) => {
+    const n = def.nodes.find(x => x.id === id);
+    const on = enabled[id] !== false;
+    const st = statuses[id] || "idle";
+    const stText = { idle: "待运行", running: "运行中…", success: "✓ 成功", failed: "✗ 失败", skipped: "已跳过" }[st];
+    const rep = reports[id] ? `<button data-open="${reports[id]}">📄 报告</button>` : "";
+    return `<div class="stage-row ${optional ? "optional" : ""} ${on ? "" : "off"}">
+      <label class="switch"><input type="checkbox" data-toggle="${id}" ${on ? "checked" : ""}></label>
+      <div class="idx">${i + 1}</div>
+      <div class="info">
+        <div class="name">${n.icon} ${n.label} ${optional ? '<span style="font-size:10px;color:var(--muted)">（可选阶段）</span>' : ""}</div>
+        <div class="sub">${n.desc} · ${n.params.length} 个参数</div>
+      </div>
+      <span class="st st-${st}">${stText}</span>
+      <div class="ops">
+        <button data-up="${id}" title="上移" ${i === 0 ? "disabled" : ""}>↑</button>
+        <button data-down="${id}" title="下移" ${i === list.length - 1 ? "disabled" : ""}>↓</button>
+        <button data-params="${id}">参数</button>
+        ${rep}
+        <button data-run1="${id}">▶ 运行</button>
+      </div>
+    </div>`;
+  };
+  html += `<div class="section-title">主流程（参与「运行全部」）</div>`;
+  html += main.map((id, i) => row(id, i, main, false)).join("");
+  html += `<div class="section-title">进阶阶段（可选）</div>`;
+  html += opt.map((id, i) => row(id, i, opt, true)).join("");
+
+  listView.innerHTML = html;
+  listView.querySelectorAll("[data-toggle]").forEach(cb =>
+    cb.addEventListener("change", () => { enabled[cb.dataset.toggle] = cb.checked; saveLS(); renderList(); }));
+  listView.querySelectorAll("[data-up]").forEach(b => b.addEventListener("click",
+    () => move(b.dataset.up, -1)));
+  listView.querySelectorAll("[data-down]").forEach(b => b.addEventListener("click",
+    () => move(b.dataset.down, +1)));
+  listView.querySelectorAll("[data-params]").forEach(b => b.addEventListener("click",
+    () => selectNode(b.dataset.params)));
+  listView.querySelectorAll("[data-run1]").forEach(b => b.addEventListener("click",
+    () => runWorkflow([b.dataset.run1])));
+  listView.querySelectorAll("[data-open]").forEach(b => b.addEventListener("click",
+    () => openReport(b.dataset.open)));
+  listView.querySelectorAll("[data-preset]").forEach(b => b.addEventListener("click",
+    () => applyPreset(b.dataset.preset)));
+}
+function move(id, delta) {
+  const order = chainOrder();
+  const list = order.filter(x => isOptional(x) === isOptional(id));
+  const i = list.indexOf(id), j = i + delta;
+  if (i < 0 || j < 0 || j >= list.length) return;
+  [list[i], list[j]] = [list[j], list[i]];
+  const newOrder = isOptional(id) ? order.filter(x => !isOptional(x)).concat(list)
+                                  : list.concat(order.filter(x => isOptional(x)));
+  relinearize(newOrder);
+  renderList();
+}
+function applyPreset(pid) {
+  const p = PRESETS.find(x => x.id === pid);
+  if (!p || !p.order) { renderList(); return; }
+  def.nodes.forEach(n => { enabled[n.id] = p.order.includes(n.id); });
+  relinearize(p.order);
+  renderList();
+  statusText.textContent = `已应用预设：${p.name}`;
+}
+
+// ---------- 报告抽屉 ----------
+async function refreshReports(silent) {
+  try {
+    const res = await fetch(API.reports);
+    const data = await res.json();
+    const list = data.reports || [];
+    if (!list.length) {
+      reportList.innerHTML = '<div style="font-size:12px;color:var(--muted);padding:10px">还没有报告。跑一次流程后，每个阶段都会在这里生成一份。</div>';
+      return;
+    }
+    reportList.innerHTML = list.map(r =>
+      `<div class="item" data-name="${r.file}">${r.title}<div class="t">${r.mtime} · ${(r.bytes/1024).toFixed(1)} KB</div></div>`
+    ).join("");
+    reportList.querySelectorAll(".item").forEach(el =>
+      el.addEventListener("click", () => loadReport(el.dataset.name, el)));
+    if (!silent) loadReport(list[0].file, reportList.querySelector(".item"));
+  } catch (e) {
+    reportList.innerHTML = '<div style="font-size:12px;color:var(--fail);padding:10px">读取报告失败</div>';
+  }
+}
+async function loadReport(name, el) {
+  if (!name) { statusText.textContent = "该阶段还没有报告，先运行一次"; return; }
+  reportList.querySelectorAll(".item").forEach(x => x.classList.remove("on"));
+  if (el) el.classList.add("on");
+  try {
+    const res = await fetch(API.reportContent + "?name=" + encodeURIComponent(name));
+    const data = await res.json();
+    reportBody.innerHTML = mdToHtml(data.markdown || "");
+    reportBody.scrollTop = 0;
+  } catch (e) {
+    reportBody.innerHTML = '<p style="color:var(--fail)">加载失败</p>';
+  }
+}
+function openReport(name) {
+  drawer.classList.add("on");
+  refreshReports(true);
+  if (name) setTimeout(() => {
+    const el = reportList.querySelector(`.item[data-name="${name}"]`);
+    loadReport(name, el);
+  }, 200);
+}
+document.getElementById("btn-reports").addEventListener("click", () => openReport(null));
+document.getElementById("btn-close-drawer").addEventListener("click", () => drawer.classList.remove("on"));
+document.getElementById("btn-refresh-reports").addEventListener("click", () => refreshReports());
+document.getElementById("btn-theme").addEventListener("click", () => {
+  applyTheme(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark");
+});
+
+// 迷你 Markdown 渲染 (标题/表格/列表/引用/代码/行内格式)
+function mdToHtml(md) {
+  const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const inline = s => esc(s)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+  const lines = (md || "").split(/\r?\n/);
+  let html = "", inCode = false, inList = false, inTable = false, buf = [];
+  const flushTable = () => {
+    if (!inTable) return;
+    const rows = buf.filter(r => !/^\|[\s\-:|]+\|$/.test(r));
+    html += "<table>";
+    rows.forEach((r, i) => {
+      const cells = r.replace(/^\||\|$/g, "").split("|").map(c => c.trim());
+      html += "<tr>" + cells.map(c => i === 0 ? `<th>${inline(c)}</th>` : `<td>${inline(c)}</td>`).join("") + "</tr>";
+    });
+    html += "</table>";
+    buf = []; inTable = false;
+  };
+  for (const raw of lines) {
+    const line = raw;
+    if (line.trim().startsWith("```")) {
+      flushTable();
+      if (inList) { html += "</ul>"; inList = false; }
+      html += inCode ? "</code></pre>" : "<pre><code>";
+      inCode = !inCode;
+      continue;
+    }
+    if (inCode) { html += esc(line) + "\n"; continue; }
+    if (/^\s*\|.*\|\s*$/.test(line)) { inTable = true; buf.push(line.trim()); continue; }
+    flushTable();
+    const h = /^(#{1,4})\s+(.*)$/.exec(line);
+    if (h) {
+      if (inList) { html += "</ul>"; inList = false; }
+      const lvl = Math.min(h[1].length, 3);
+      html += `<h${lvl}>${inline(h[2])}</h${lvl}>`;
+      continue;
+    }
+    if (/^\s*[-*]\s+/.test(line)) {
+      if (!inList) { html += "<ul>"; inList = true; }
+      html += `<li>${inline(line.replace(/^\s*[-*]\s+/, ""))}</li>`;
+      continue;
+    }
+    if (inList) { html += "</ul>"; inList = false; }
+    if (/^\s*>\s?/.test(line)) { html += `<blockquote>${inline(line.replace(/^\s*>\s?/, ""))}</blockquote>`; continue; }
+    if (!line.trim()) continue;
+    html += `<p>${inline(line)}</p>`;
+  }
+  if (inList) html += "</ul>";
+  if (inTable) flushTable();
+  if (inCode) html += "</code></pre>";
+  return html;
 }
 
 // ---------- 执行 ----------
+function runSet() {
+  // 「运行全部」= 勾选的节点 (可选阶段需显式勾选)
+  const on = def.nodes.filter(n => enabled[n.id] !== false).map(n => n.id);
+  return on;
+}
 async function runWorkflow(only) {
   if (running) return;
+  const targets = only && only.length ? only : runSet();
+  if (!targets.length) { statusText.textContent = "没有勾选任何阶段"; return; }
   running = true;
   btnRun.disabled = true;
   btnStop.disabled = false;
-  statusText.textContent = only ? `运行节点: ${only.join(", ")}` : "运行全部节点…";
+  statusText.textContent = only && only.length ? `运行节点: ${only.join(", ")}` : `运行 ${targets.length} 个阶段…`;
   progressBar.style.width = "0%";
-
-  // 重置状态
+  reports = {};
   def.nodes.forEach(n => {
     statuses[n.id] = "idle";
     const el = document.getElementById("node-" + n.id);
-    el.className = "wf-node" + (n.optional ? " optional" : "");
-    const box = nodeLogs(n.id);
-    if (box) { box.textContent = ""; box.classList.remove("show"); }
+    if (el) {
+      el.className = "wf-node" + (n.optional ? " optional" : "");
+      const b = el.querySelector('[data-report]');
+      if (b) b.style.display = "none";
+      const box = nodeLogs(n.id);
+      if (box) { box.textContent = ""; box.classList.remove("show"); }
+    }
   });
+  if (listView.classList.contains("on")) renderList();
 
   try {
     const resp = await fetch(API.run, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ params, only: only || [] }),
+      body: JSON.stringify({ params, only: targets }),
     });
     if (!resp.ok || !resp.body) {
       const msg = await resp.json().catch(() => ({}));
@@ -650,6 +1014,7 @@ async function runWorkflow(only) {
     running = false;
     btnRun.disabled = false;
     btnStop.disabled = true;
+    refreshReports(true);
   }
 }
 window.runOnly = id => runWorkflow([id]);
@@ -658,18 +1023,21 @@ let doneCount = 0;
 function handleEvent(ev) {
   if (ev.event === "status") {
     setNodeStatus(ev.node, ev.status);
-    if (ev.status === "running" || ev.status === "success") {
-      if (ev.status === "success") doneCount++;
-      const total = def.nodes.length;
-      statusText.textContent = `进度 ${doneCount}/${total} — ${ev.node} ${ev.status === "running" ? "运行中" : "完成"}`;
-      progressBar.style.width = Math.min(100, (doneCount / total) * 100) + "%";
-    }
+    if (ev.status === "success") doneCount++;
+    const total = Math.max(runSet().length, 1);
+    progressBar.style.width = Math.min(100, (doneCount / total) * 100) + "%";
+    statusText.textContent = `进度 ${doneCount}/${total} — ${ev.node} ${
+      ev.status === "running" ? "运行中" : ev.status === "success" ? "完成" : ev.status}`;
   } else if (ev.event === "log") {
     appendLog(ev.node, ev.line);
+  } else if (ev.event === "report") {
+    setNodeReport(ev.node, ev.report);
+    refreshReports(true);
   } else if (ev.event === "done") {
     doneCount = 0;
-    statusText.textContent = ev.ok ? "✓ 工作流执行完成" : "✗ 工作流失败 (详情见节点日志)";
+    statusText.textContent = ev.ok ? "✓ 工作流执行完成（报告已生成，点 📄 查看）" : "✗ 工作流失败 (详情见节点日志)";
     if (ev.ok) progressBar.style.width = "100%";
+    refreshReports(true);
   }
 }
 
@@ -681,11 +1049,12 @@ btnStop.addEventListener("click", async () => {
 });
 btnReset.addEventListener("click", () => {
   def.nodes.forEach(n => { positions[n.id] = { x: n.x, y: n.y }; });
-  // 恢复默认连线 (仅主流程; 可选阶段保持孤立, 单独运行)
   const main = def.nodes.filter(n => !n.optional);
   def.edges = main.slice(0, -1).map((n, i) => ({ from: n.id, to: main[i + 1].id }));
+  def.nodes.forEach(n => { enabled[n.id] = !n.optional; });
   view = { x: 20, y: 20, scale: 1 };
   applyView(); buildNodes(); renderEdges(); saveLS(); renderPanelEmpty();
+  if (listView.classList.contains("on")) renderList();
 });
 
 init();

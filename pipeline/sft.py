@@ -30,7 +30,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import ROOT, cfg_get, load_config, resolve_path, size_mb  # noqa: E402
+from common import (  # noqa: E402
+    ROOT, cfg_get, load_config, resolve_path, size_mb, stage_report,
+)
 
 PROMPT_TMPL = "### 指令：\n{instruction}\n### 回答：\n{output}"
 
@@ -220,6 +222,26 @@ def main():
         print(f"[sft] 合并后模型已保存: {out_dir}")
         print(f"[sft] 下一步: python pipeline/write_gguf.py --hf-dir {out_dir.as_posix()} "
               f"--out models/tinyllm-sft-f16.gguf")
+
+    # ---------- 阶段报告 ----------
+    stage_report(
+        "sft",
+        summary=f"在 {base_dir.name} 上做 LoRA 指令微调（{len(records)} 条样本"
+                f"{f'，{args.steps} 步' if args.steps else f'，{args.epochs} 轮'}）"
+                + (f"，最终 loss **{loss:.4f}**。" if loss is not None else "。"),
+        metrics={
+            "base 模型": str(base_dir.relative_to(ROOT).as_posix()),
+            "训练样本数": len(records),
+            "训练轮数 / 步数上限": f"{args.epochs} / {args.steps or '不限'}",
+            "LoRA 可训练参数": f"{trainable:,} ({trainable / max(total, 1):.2%})",
+            "最终 train_loss": f"{loss:.4f}" if loss is not None else "—",
+            "训练设备": device,
+        },
+        artifacts=[adapter_dir] + ([] if args.no_merge else [out_dir]),
+        notes="合并后的模型走同一条导出/量化链路："
+              "`python pipeline/write_gguf.py --hf-dir models/tinyllm-hf-sft "
+              "--out models/tinyllm-sft-f16.gguf`，再用 llama-quantize 量化。",
+    )
 
 
 if __name__ == "__main__":

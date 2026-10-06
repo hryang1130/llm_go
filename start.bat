@@ -9,16 +9,29 @@ setlocal EnableDelayedExpansion
 set "PROJECT_DIR=%~dp0"
 set "GATEWAY_PORT=8080"
 
-rem --- locate python: env var > system PATH > fallback ---
+rem --- locate python: PYTHON_CMD > project venv > PATH (实测能否 import yaml) ---
+rem 只挑真正装了依赖的解释器: PATH 里的 python 常常是精简版, 会让每个节点 ModuleNotFoundError
 if not defined PYTHON_CMD (
-    for /f "delims=" %%i in ('where python 2^>nul ^| findstr /v "WindowsApps"') do (
-        if not defined PYTHON_CMD set "PYTHON_CMD=%%i"
+    for %%d in ("%PROJECT_DIR%.venv" "%PROJECT_DIR%venv" "%PROJECT_DIR%env") do (
+        if not defined PYTHON_CMD if exist "%%~d\Scripts\python.exe" (
+            "%%~d\Scripts\python.exe" -c "import yaml" >nul 2>&1
+            if not errorlevel 1 set "PYTHON_CMD=%%~d\Scripts\python.exe"
+        )
     )
 )
 if not defined PYTHON_CMD (
-    echo [start] WARNING: python not found on PATH, set PYTHON_CMD first:
-    echo [start]   set PYTHON_CMD=C:\path\to\python.exe
-    echo [start] (training/export nodes will fail, gateway/web UI still works)
+    for /f "delims=" %%i in ('where python 2^>nul ^| findstr /v "WindowsApps"') do (
+        if not defined PYTHON_CMD (
+            "%%i" -c "import yaml" >nul 2>&1
+            if not errorlevel 1 set "PYTHON_CMD=%%i"
+        )
+    )
+)
+if not defined PYTHON_CMD (
+    echo [start] WARNING: no python with pyyaml found. Set PYTHON_CMD first:
+    echo [start]   set PYTHON_CMD=C:\path\to\venv\Scripts\python.exe
+    echo [start] then install deps:  pip install -r requirements.txt
+    echo [start] (training/export nodes will fail with ModuleNotFoundError; gateway/web UI still works)
     set "PYTHON_CMD=python"
 )
 

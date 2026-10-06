@@ -322,6 +322,8 @@ docker compose run pipeline   # 一键训练+导出 (需挂载 llama.cpp 仓库,
 - **调模型**: 改 `pipeline/config.yaml` 的 `model` 段（层数/维度），注意 CPU 训练时间会随之增长
 - **换量化方案**: 改 `config.yaml` 的 `quantize.type`（Q8_0 更准、Q4_K_S 更小）
 - **常见坑**:
+  - **网关用哪个 Python**: 工作流节点由网关以 `PYTHON_CMD`（或 PATH 里的 `python`）启动子进程。PATH 里的 `python` 常常是没装依赖的精简解释器，会让每个节点以 `ModuleNotFoundError: No module named 'yaml'` 失败、后续节点全部跳过。网关现在会按 `PYTHON_CMD → VIRTUAL_ENV → 项目 .venv/venv/env → PATH` 顺序**实测 `import yaml`** 挑出一个能用的解释器并在启动日志里打印；`start.bat` 同样会探测。仍建议显式指定：`set PYTHON_CMD=D:\envs\llm_go\Scripts\python.exe`
+  - **导出/量化不需要 llama.cpp 源码仓库**: `export_gguf.py --llama-cpp <目录>` 里的目录只需包含 `bin/llama-quantize`（release 解压即可），转换这一步由项目自带的 `write_gguf.py` 完成
   - Trainer 需要 `accelerate`（已写入 requirements.txt）
   - llama-quantize 在输出重定向到管道时可能报 iostream 错误并返回非零，但产物已生成——`export_gguf.py` 已按产物判断成败
   - 新版 llama-server 对非流式 `/completion` 输出做严格 UTF-8 校验，小模型偶发的坏字节会 500；流式请求不受影响（工作流测试节点已用流式）

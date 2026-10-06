@@ -2,12 +2,15 @@
 """
 阶段 2+3/4 —— GGUF 导出与量化
 
-  HF 模型 --(convert_hf_to_gguf.py)--> F16 GGUF --(llama-quantize)--> Q4_K_M GGUF
+  HF 模型 --(自写 write_gguf.py)--> F16 GGUF --(llama-quantize)--> Q4_K_M GGUF
 
-前置条件 (二选一):
-  A. git clone https://github.com/ggml-org/llama.cpp 到本地 (推荐, 转换脚本在仓库里),
-     量化器 llama-quantize 可以是源码编译的, 也可以是 release 下载的。
-  B. 只下载 release 二进制: 无法转换格式, 但如果已有 GGUF 可直接量化。
+前置条件: 只需要 llama.cpp 的 **可执行文件** (llama-quantize), 不需要 clone 源码仓库。
+  去 https://github.com/ggml-org/llama.cpp/releases 下载预编译包, 解压到
+  D:/tools/llama.cpp (含 bin/ 即可), 或用 --llama-cpp <目录> 指定。
+
+为什么不用官方 convert_hf_to_gguf.py: 它用哈希白名单识别分词器, 从零自训的
+BPE 词表不在名单里, 会报 "BPE pre-tokenizer was not recognized"。所以转换这一步
+用项目自带的 pipeline/write_gguf.py。
 
 用法:
   python pipeline/export_gguf.py --llama-cpp D:/tools/llama.cpp
@@ -16,13 +19,15 @@
 
 import argparse
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "pipeline" / "config.yaml"
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from common import find_binary  # noqa: E402
 
 
 def load_config() -> dict:
@@ -31,51 +36,12 @@ def load_config() -> dict:
         return yaml.safe_load(f)
 
 
-def find_llama_cpp(explicit: str | None) -> Path:
-    """定位 llama.cpp 仓库目录。"""
-    candidates = []
-    if explicit:
-        candidates.append(Path(explicit))
-    env = os.environ.get("LLAMA_CPP_DIR")
-    if env:
-        candidates.append(Path(env))
-    candidates += [
-        Path("D:/tools/llama.cpp"),
-        Path.home() / "llama.cpp",
-        ROOT / "third_party" / "llama.cpp",
-    ]
-    for c in candidates:
-        if (c / "convert_hf_to_gguf.py").exists():
-            return c
-    raise FileNotFoundError(
-        "找不到 llama.cpp 仓库 (需要 convert_hf_to_gguf.py)。"
-        "请先 git clone https://github.com/ggml-org/llama.cpp, "
-        "然后用 --llama-cpp <路径> 指定, 或设置环境变量 LLAMA_CPP_DIR。"
-    )
-
-
-def find_quantize_binary(llama_cpp: Path, explicit: str | None) -> Path:
-    """定位 llama-quantize 可执行文件。"""
-    if explicit:
-        p = Path(explicit)
-        if p.exists():
-            return p
-    names = ["llama-quantize.exe", "llama-quantize"]
-    search_dirs = [llama_cpp / "build" / "bin", llama_cpp / "bin", llama_cpp]
-    # release 压缩包常见布局: llama.cpp/bin/llama-quantize.exe
-    for d in search_dirs:
-        for n in names:
-            p = d / n
-            if p.exists():
-                return p
-    w = shutil.which("llama-quantize")
-    if w:
-        return Path(w)
-    raise FileNotFoundError(
-        "找不到 llama-quantize。可从 https://github.com/ggml-org/llama.cpp/releases "
-        "下载对应平台的预编译包, 把 llama-quantize(.exe) 放进 llama.cpp/bin/, "
-        "或用 --quantize 指定完整路径。"
-    )
+def llama_cpp_dir(explicit: str | None) -> Path | None:
+    """llama.cpp 运行时目录 (含 llama-quantize 的 release 解压目录或源码仓库)。"""
+    for cand in (explicit, os.environ.get("LLAMA_CPP_DIR")):  # 显式参数 > 环境变量
+        if cand:
+            return Path(cand)
+    return None
 
 
 def run(cmd: list[str], **kw):
@@ -85,7 +51,8 @@ def run(cmd: list[str], **kw):
 
 def main():
     parser = argparse.ArgumentParser(description="导出 GGUF 并量化")
-    parser.add_argument("--llama-cpp", default=None, help="llama.cpp 仓库路径")
+    parser.add_argument("--llama-cpp", default=None,
+                        help="llama.cpp 目录 (含 bin/llama-quantize; 不需要源码仓库)")
     parser.add_argument("--quantize", default=None, help="llama-quantize 可执行文件路径")
     parser.add_argument("--skip-convert", action="store_true", help="跳过 HF->GGUF 转换")
     parser.add_argument("--quant-type", default=None, help="量化方案 (默认取 config.yaml)")
@@ -101,25 +68,20 @@ def main():
     if not (hf_dir / "tokenizer.model").exists() and not (hf_dir / "tokenizer.json").exists():
         sys.exit("[export] 训练产物缺少分词器文件")
 
-    llama_cpp = find_llama_cpp(args.llama_cpp) if not args.skip_convert else None
-    if llama_cpp:
-        print(f"[export] llama.cpp 仓库: {llama_cpp}")
-    else:
-        # 跳过转换时只需量化器, 单独定位
-        llama_cpp = find_llama_cpp(args.llama_cpp)
+    runtime = llama_cpp_dir(args.llama_cpp)
+    if runtime:
+        print(f"[export] llama.cpp 目录: {runtime}")
 
     f16_path = ROOT / paths["gguf_f16"]
     if not args.skip_convert:
-        # 使用项目自带的 GGUF 导出器 (llama.cpp 官方 convert_hf_to_gguf.py
-        # 的词表白名单不收录从零自训的分词器, 会报
-        # "BPE pre-tokenizer was not recognized")
+        # 使用项目自带的 GGUF 导出器 (见文件头说明)
         run([sys.executable, ROOT / "pipeline" / "write_gguf.py"])
     else:
         print(f"[export] 跳过转换, 使用现有 {f16_path}")
     if not f16_path.exists():
         sys.exit(f"[export] 转换失败: {f16_path} 不存在")
 
-    quantizer = find_quantize_binary(llama_cpp, args.quantize)
+    quantizer = find_binary("quantize", explicit=args.quantize, root=runtime)
     q4_path = ROOT / paths["gguf_q4"]
     print(f"[quantize] {f16_path.name} -> {q4_path.name} ({qtype})")
     # 注: 部分版本 llama-quantize 在输出重定向到管道时会以 iostream 错误

@@ -15,6 +15,10 @@ out/
 server/llm-gateway
 *.exe
 
+# 编辑器/工具留下的备份文件
+*~
+*.bak
+
 # IDE / 系统
 .idea/
 .vscode/

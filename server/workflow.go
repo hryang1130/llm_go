@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -181,11 +182,70 @@ type workflowRunner struct {
 
 func newWorkflowRunner() *workflowRunner {
 	root := findProjectRoot()
-	py := os.Getenv("PYTHON_CMD")
-	if py == "" {
-		py = "python"
+	py, note := detectPython(root)
+	log.Printf("流水线 Python: %s", py)
+	if note != "" {
+		log.Printf("提示: %s", note)
 	}
 	return &workflowRunner{root: root, pythonCmd: py}
+}
+
+// detectPython 挑一个真正装了流水线依赖的 Python。
+//
+// 直接信任 PATH 里的 python 是常见翻车点: 它可能是个精简解释器 (缺 yaml/torch),
+// 于是每个节点都以 ModuleNotFoundError 失败、后续节点全部跳过。
+// 这里按 PYTHON_CMD → VIRTUAL_ENV → 项目内 venv → PATH 的顺序探测,
+// 用 "import yaml" 实测, 再优先挑装了 torch 的那个 (训练/SFT 需要)。
+func detectPython(root string) (string, string) {
+	seen := map[string]bool{}
+	var yamlOnly string
+	for _, cand := range pythonCandidates(root) {
+		if cand == "" || seen[cand] {
+			continue
+		}
+		seen[cand] = true
+		if !probePython(cand, "import yaml") {
+			continue
+		}
+		if probePython(cand, "import torch") {
+			return cand, "" // 依赖最全, 直接用
+		}
+		if yamlOnly == "" {
+			yamlOnly = cand
+		}
+	}
+	if yamlOnly != "" {
+		return yamlOnly, "该解释器缺少 torch, 训练/指令微调节点会失败; 建议设置 PYTHON_CMD 指向装了依赖的虚拟环境"
+	}
+	return "python", "未找到含 pyyaml 的 Python 解释器, 流水线节点可能报 ModuleNotFoundError; 请设置 PYTHON_CMD"
+}
+
+// pythonCandidates 按优先级列出候选解释器。
+func pythonCandidates(root string) []string {
+	var c []string
+	if v := os.Getenv("PYTHON_CMD"); v != "" {
+		c = append(c, v)
+	}
+	if v := os.Getenv("VIRTUAL_ENV"); v != "" {
+		c = append(c, filepath.Join(v, "Scripts", "python.exe"), filepath.Join(v, "bin", "python"))
+	}
+	for _, rel := range []string{".venv", "venv", "env"} {
+		c = append(c,
+			filepath.Join(root, rel, "Scripts", "python.exe"),
+			filepath.Join(root, rel, "bin", "python"))
+	}
+	c = append(c, "python", "python3", "py")
+	return c
+}
+
+// probePython 用一段极短的代码验证解释器可用且能 import 指定模块。
+func probePython(python, code string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, python, "-c", code)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Run() == nil
 }
 
 // findProjectRoot 从当前目录向上查找包含 pipeline/ 的目录作为项目根。
@@ -310,14 +370,26 @@ func (r *workflowRunner) runNode(ctx context.Context, node string, req *runReque
 		ls := exec.CommandContext(ctx, binPath,
 			"-m", model, "--host", "127.0.0.1", "--port", port, "--ctx-size", ctxSize)
 		ls.Dir = r.root
-		ls.Stdout = io.Discard
-		ls.Stderr = io.Discard
+		// 输出落到日志文件, 启动失败时回显末尾几行 (否则用户只看到"健康检查超时")
+		logPath := filepath.Join(r.root, "out", "llama-server-deploy.log")
+		_ = os.MkdirAll(filepath.Dir(logPath), 0o755)
+		logFile, ferr := os.Create(logPath)
+		if ferr == nil {
+			defer logFile.Close()
+			ls.Stdout = logFile
+			ls.Stderr = logFile
+		} else {
+			ls.Stdout = io.Discard
+			ls.Stderr = io.Discard
+		}
 		if err := ls.Start(); err != nil {
 			r.emit(ch, wfEvent{Event: "log", Node: node, Line: "启动失败: " + err.Error()})
 			r.emit(ch, wfEvent{Event: "status", Node: node, Status: "failed"})
 			return false
 		}
 		r.llamaServer = ls
+		exited := make(chan struct{})
+		go func() { _ = ls.Wait(); close(exited) }() // 提前退出时用 exited 立即结束等待
 		action = func() error {
 			// 轮询健康检查, 最长 60s
 			url := fmt.Sprintf("http://127.0.0.1:%s/health", port)
@@ -327,17 +399,27 @@ func (r *workflowRunner) runNode(ctx context.Context, node string, req *runReque
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
+				case <-exited: // 进程自己退出了, 不必等满超时
+					for _, l := range tailLines(logPath, 15) {
+						r.emit(ch, wfEvent{Event: "log", Node: node, Line: "[llama-server] " + l})
+					}
+					return fmt.Errorf("llama-server 启动后立即退出, 完整日志: %s", logPath)
 				default:
 				}
 				if resp, err := client.Get(url); err == nil {
 					resp.Body.Close()
 					if resp.StatusCode == http.StatusOK {
+						r.emit(ch, wfEvent{Event: "log", Node: node,
+							Line: fmt.Sprintf("llama-server 就绪: %s (端口 %s)", filepath.Base(binPath), port)})
 						return nil
 					}
 				}
 				time.Sleep(1 * time.Second)
 			}
-			return fmt.Errorf("健康检查超时 (%s)", url)
+			for _, l := range tailLines(logPath, 15) {
+				r.emit(ch, wfEvent{Event: "log", Node: node, Line: "[llama-server] " + l})
+			}
+			return fmt.Errorf("llama-server 未就绪 (%s), 完整日志: %s", url, logPath)
 		}
 
 	case "test":
@@ -470,6 +552,7 @@ func streamCmd(ctx context.Context, cmd *exec.Cmd, node string, ch chan wfEvent)
 	}
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
+	hinted := false
 	for sc.Scan() {
 		select {
 		case <-ctx.Done():
@@ -477,9 +560,25 @@ func streamCmd(ctx context.Context, cmd *exec.Cmd, node string, ch chan wfEvent)
 			return ctx.Err()
 		default:
 		}
-		ch <- wfEvent{Event: "log", Node: node, Line: sc.Text()}
+		line := sc.Text()
+		ch <- wfEvent{Event: "log", Node: node, Line: line}
+		// 解释器依赖缺失时给出可操作提示 (否则用户只看到一长串 Traceback)
+		if !hinted && strings.Contains(line, "No module named") {
+			hinted = true
+			ch <- wfEvent{Event: "log", Node: node, Line: "ℹ " + pythonHint(line)}
+		}
 	}
 	return cmd.Wait()
+}
+
+// pythonHint 把 ModuleNotFoundError 翻译成"怎么修"。
+func pythonHint(line string) string {
+	mod := "依赖"
+	if i := strings.Index(line, "No module named "); i >= 0 {
+		mod = strings.Trim(strings.TrimSpace(line[i+len("No module named "):]), "'\"")
+	}
+	return fmt.Sprintf("缺模块 %s: 当前解释器没装流水线依赖。设置 PYTHON_CMD 指向装有依赖的虚拟环境 "+
+		"(如 set PYTHON_CMD=D:\\envs\\llm_go\\Scripts\\python.exe) 后重启网关, 或执行 pip install -r requirements.txt", mod)
 }
 
 func (r *workflowRunner) topoOrder(def WFDef) ([]string, error) {
@@ -557,7 +656,8 @@ func (r *workflowRunner) handleRun(c *gin.Context) {
 			ch <- wfEvent{Event: "done", OK: false, Msg: err.Error()}
 			return
 		}
-		// only 过滤 (调试): 保留指定节点及其前驱
+		wdef := workflowDef()
+		// only 过滤 (调试): 保留指定节点及其**全部**前驱
 		runSet := map[string]bool{}
 		explicit := map[string]bool{}   // 用户在界面上明确要求运行的节点
 		if len(req.Only) > 0 {
@@ -566,10 +666,21 @@ func (r *workflowRunner) handleRun(c *gin.Context) {
 				need[id] = true
 				explicit[id] = true
 			}
-			for _, id := range order {
-				for _, t := range adjOf(workflowDef(), id) {
-					if need[t] {
-						need[id] = true
+			// 反向遍历拓扑序求传递闭包: 一直标记到没有新增为止
+			// (只做一趟的话链式前驱会漏, 例如 only=test 时 data/train/export/quantize 会被跳过)
+			for changed := true; changed; {
+				changed = false
+				for i := len(order) - 1; i >= 0; i-- {
+					id := order[i]
+					if need[id] {
+						continue
+					}
+					for _, t := range adjOf(wdef, id) {
+						if need[t] {
+							need[id] = true
+							changed = true
+							break
+						}
 					}
 				}
 			}
@@ -578,7 +689,7 @@ func (r *workflowRunner) handleRun(c *gin.Context) {
 			}
 		}
 
-		def := workflowDef()
+		def := wdef
 		ok := true
 		for _, id := range order {
 			if len(runSet) > 0 && !runSet[id] {
@@ -649,6 +760,19 @@ func (r *workflowRunner) handleCancel(c *gin.Context) {
 }
 
 // ---------- 小工具 ----------
+
+// tailLines 读取文件末尾 n 行 (文件不存在或读失败时返回 nil)。
+func tailLines(path string, n int) []string {
+	b, err := os.ReadFile(path)
+	if err != nil || len(b) == 0 {
+		return nil
+	}
+	lines := strings.Split(strings.TrimRight(string(b), "\r\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return lines
+}
 
 func joinArgs(args []string) string {
 	out := ""

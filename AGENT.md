@@ -34,7 +34,29 @@ Language split by artifact:
 | Code comments | Chinese (match surrounding code) |
 | Runtime log lines / CLI help | Chinese |
 | `README.md` | Chinese |
+| `README.en.md` | English |
 | `AGENT.md`, `LICENSE` | English |
+
+### Bilingual README rule
+
+The README exists in two files that must stay in sync:
+
+| File | Language | Role |
+|---|---|---|
+| `README.md` | 简体中文 | Default (rendered by GitHub) |
+| `README.en.md` | English | Translation |
+
+Both files start with a one-line language switcher linking to the other:
+
+```markdown
+> 🌐 [English](README.en.md) | **简体中文**      <!-- top of README.md -->
+> 🌐 **English** | [简体中文](README.md)        <!-- top of README.en.md -->
+```
+
+**Any change to one README must be mirrored in the other in the same commit.**
+Translations must be faithful, not summaries: keep the same section order, tables,
+code blocks, file paths and numbers. Code blocks and commands are identical in both
+files; only prose differs.
 
 ---
 

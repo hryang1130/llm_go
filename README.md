@@ -1,3 +1,5 @@
+> 🌐 [English](README.en.md) | **简体中文**
+
 # llm_go —— LLM 全链路工作流: 训练 → 推理 → 量化 → 部署
 
 从零开始训练一个小型 LLaMA 架构语言模型，导出为 GGUF，用 llama.cpp 量化压缩，最后通过 Go 网关对外提供 OpenAI 兼容的推理服务。

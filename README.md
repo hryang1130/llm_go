@@ -1,247 +1,278 @@
-> 🌐 [English](README.en.md) | **简体中文**
+> 🌐 **English** | [简体中文](README.zh-CN.md)
 
-# llm_go —— LLM 全链路工作流: 训练 → 推理 → 量化 → 部署
+# llm_go — Full-Stack LLM Workflow: Train → Inference → Quantize → Deploy
 
-从零开始训练一个小型 LLaMA 架构语言模型，导出为 GGUF，用 llama.cpp 量化压缩，最后通过 Go 网关对外提供 OpenAI 兼容的推理服务。
+Train a small LLaMA-architecture language model from scratch, export it to GGUF, compress it with llama.cpp quantization, and serve it through a Go gateway that exposes an OpenAI-compatible inference API.
 
-## 架构总览
+## Architecture at a glance
 
 ```
-阶段1    训练      train.py            BPE 分词 + 从零训练 LLaMA (兼作投机解码的 draft)
-阶段1.5  后训练    sft.py              LoRA 指令微调 (SFT), 合并回 HF 权重后复用后续链路
-阶段2    导出      write_gguf.py       HF → GGUF (F16); 自写导出器绕过官方词表白名单
-阶段3    量化      export_gguf.py      F16 → Q4_K_M (基础链路)
-         量化工程  quantize_sweep.py   imatrix 校准 + Q8_0/Q4_K_M/Q4_K_S/IQ4_XS 体积对比
-阶段4    部署      Go 网关 + llama-server  OpenAI 兼容 API, 流式输出, Docker 编排
-         评测      eval.py             PPL / 首 token 延迟 / 解码吞吐 / KV cache 量化
-         加速      spec_decode.py      draft + target 投机解码, 输出加速比与接受率
+Stage 1    Train       train.py            BPE tokenizer + from-scratch LLaMA (doubles as the draft model)
+Stage 1.5  Post-train  sft.py              LoRA instruction tuning (SFT); merged back into HF weights
+Stage 2    Export      write_gguf.py       HF → GGUF (F16); a custom exporter sidesteps the vocab whitelist
+Stage 3    Quantize    export_gguf.py      F16 → Q4_K_M (baseline path)
+           Quant eng.  quantize_sweep.py   imatrix calibration + Q8_0/Q4_K_M/Q4_K_S/IQ4_XS size comparison
+Stage 4    Deploy      Go gateway + llama-server  OpenAI-compatible API, streaming, Docker orchestration
+           Evaluate    eval.py              PPL / time-to-first-token / decode throughput / KV-cache quantization
+           Speed up    spec_decode.py       draft + target speculative decoding; speedup and acceptance rate
 ```
 
 ```
 ┌──────────────┐   ┌──────────────┐   ┌───────────────┐   ┌──────────────┐
-│ 阶段1 训练    │──▶│ 阶段2 导出    │──▶│ 阶段3 量化     │──▶│ 阶段4 部署    │
-│ train.py     │   │ write_gguf.py│   │ llama-quantize│   │ Go 网关 +    │
+│ Stage 1      │──▶│ Stage 2      │──▶│ Stage 3       │──▶│ Stage 4      │
+│ train.py     │   │ write_gguf.py│   │ llama-quantize│   │ Go gateway + │
 │ (transformers)│  │ HF → GGUF    │   │ (+ imatrix)   │   │ llama-server │
 └──────────────┘   └──────────────┘   └───────────────┘   └──────────────┘
         │                                     ▲                   │
-        │ 阶段1.5 sft.py                      │ quantize_sweep.py │ eval.py
-        └──────────────▶ HF(微调后) ──────────┘                   ▼
-                                                    spec_decode.py (draft+target 投机解码)
+        │ Stage 1.5 sft.py                    │ quantize_sweep.py │ eval.py
+        └──────────────▶ HF (fine-tuned) ─────┘                   ▼
+                                                 spec_decode.py (draft+target speculative decoding)
 ```
 
-- **draft 模型**：默认的 3~4M 参数小模型（hidden 256 / 4 层 / GQA），CPU 即可训练。
-- **target 模型**：`model_target` 段定义的更大一档（hidden 512 / 6 层），与 draft 共用同一分词器，
-  供投机解码实验使用；同样可在 CPU 上训练。
+- **draft model**: the default 3–4M parameter model (hidden 256 / 4 layers / GQA), trainable on CPU.
+- **target model**: a larger variant defined in the `model_target` section (hidden 512 / 6 layers).
+  It shares the same tokenizer as the draft model and exists for speculative decoding experiments —
+  also trainable on CPU.
 
-## 目录结构
+## Repository layout
 
 ```
 llm_go/
 ├── data/
-│   ├── corpus.txt           # 训练语料 (中英双语示例, 可替换)
-│   ├── eval.txt             # 评测文本 (困惑度用, 建议换成自己的留出语料)
-│   └── sft_sample.jsonl     # 指令微调样例数据 (instruction/input/output)
+│   ├── corpus.txt           # Training corpus (bilingual sample; replace it)
+│   ├── eval.txt             # Evaluation text for perplexity (use your own held-out data)
+│   └── sft_sample.jsonl     # Instruction-tuning samples (instruction/input/output)
 ├── pipeline/
-│   ├── config.yaml          # 全局配置: 模型结构 / 训练超参 / 路径 / 量化 / 评测 / SFT
-│   ├── common.py            # 公共工具: 二进制定位 / 命令执行 / Markdown 报告
-│   ├── train.py             # 阶段1: BPE 分词 + 从零训练 (--profile tiny|target)
-│   ├── sft.py               # 阶段1.5: LoRA 指令微调
-│   ├── export_gguf.py       # 阶段2+3: 编排导出与量化
-│   ├── write_gguf.py        # 阶段2: 自写 GGUF 导出器 (支持任意 HF 目录)
-│   ├── quantize_sweep.py    # 阶段3+: imatrix 校准 + 多方案量化对比
-│   ├── eval.py              # 阶段4+: PPL / 延迟 / 吞吐 / KV cache 量化评测
-│   ├── spec_decode.py       # 阶段4+: 投机解码加速实验
-│   └── smoke_test.py        # 冒烟测试 (--hf 测 HF 模型 / --gguf 测服务)
+│   ├── config.yaml          # Global config: model shape / hyperparameters / paths / quantize / eval / SFT
+│   ├── common.py            # Shared helpers: binary lookup / command execution / Markdown reports
+│   ├── train.py             # Stage 1: BPE tokenizer + from-scratch training (--profile tiny|target)
+│   ├── sft.py               # Stage 1.5: LoRA instruction tuning
+│   ├── export_gguf.py       # Stage 2+3: orchestrates export and quantization
+│   ├── write_gguf.py        # Stage 2: custom GGUF exporter (works with any HF directory)
+│   ├── quantize_sweep.py    # Stage 3+: imatrix calibration + multi-scheme quantization comparison
+│   ├── eval.py              # Stage 4+: PPL / latency / throughput / KV-cache quantization benchmark
+│   ├── spec_decode.py       # Stage 4+: speculative decoding speedup experiment
+│   └── smoke_test.py        # Smoke test (--hf for the HF model / --gguf for the served endpoint)
 ├── server/
-│   ├── main.go              # 阶段4: Go 推理网关 (Gin)
-│   ├── workflow.go          # 可视化工作流执行引擎 (含可选阶段)
-│   └── web/index.html       # 节点编辑器前端
-├── Dockerfile.pipeline      # 训练镜像
-├── Dockerfile.server        # 网关镜像
-├── docker-compose.yml       # llama-server + gateway 编排
+│   ├── main.go              # Stage 4: Go inference gateway (Gin)
+│   ├── workflow.go          # Visual workflow execution engine (including optional stages)
+│   └── web/index.html       # Node-editor front end
+├── Dockerfile.pipeline      # Training image
+├── Dockerfile.server        # Gateway image
+├── docker-compose.yml       # llama-server + gateway orchestration
 └── Makefile
 ```
 
-## 可视化工作流界面 (推荐入口)
+## Visual workflow UI (recommended entry point)
 
-不敲命令也能跑通全流程——内置节点编辑器，把流水线画在画布上：
+You can run the whole pipeline without typing a single command — a built-in node editor lets you
+lay the pipeline out on a canvas:
 
 ```bash
-cd server && go run .          # 或运行编译好的 llm-gateway.exe
-# 浏览器打开 http://localhost:8080/web/
+cd server && go run .          # or run the compiled llm-gateway.exe
+# then open http://localhost:8080/web/
 ```
 
-界面功能：
+What the UI gives you:
 
-- **双视图编排**：「画布」是原来的节点编辑器（拖拽连线）；「列表」视图把阶段按执行顺序排成清单——勾选参与哪些阶段、↑↓ 调整先后（自动按勾选项重连主线）、每个阶段行内直达「参数 / 运行 / 报告」，不想拖拽就用它
-- **预设模板**：一键切换「快速跑通 / 完整实验 / 精度优先 / 端侧速度 / 自定义」，自动勾选阶段并排好顺序
-- **阶段报告**：每个阶段跑完自动生成 Markdown 报告到 `out/reports/<阶段>.md`（含关键指标、产物体积、日志与备注），另有 `run.md` 运行总结；顶栏 📄 打开抽屉直接阅读，节点卡片上也会出现「📄 报告」直达按钮
-- **日夜主题**：顶栏 ☀️/🌙 一键切换，跟随 localStorage 记忆
-- **节点画布**：数据准备 → 模型训练 → 导出 GGUF → 量化 → 启动推理服务 → 冒烟测试，六个主流程节点按拓扑序连线
-- **可选阶段**（虚线边框 + 「可选」标记）：训练 target 模型 / 指令微调 (LoRA) / 量化方案对比 / 评测基准 / 投机解码实验。
-  这些阶段默认**不参与「运行全部」**，避免一键流程被额外依赖打断；点节点上的「仅运行此节点」单独执行
-- **自由编排**：拖拽节点调整位置，从右侧圆点拖到下一节点左侧圆点即可重新连线；滚轮缩放、空白处拖拽平移
-- **参数面板**：点击节点编辑参数（训练轮数、批大小、llama.cpp 路径、量化方案、服务端口、测试 Prompt、评测轮数等），也可「仅运行此节点」
-- **实时日志**：点击「▶ 运行全部」后，后端按连线拓扑序逐节点执行，每个节点的 stdout 通过 SSE 实时显示在节点卡片内
-- **运行控制**：随时「■ 停止」（会同时杀掉 llama-server 子进程），布局/连线/参数自动保存在浏览器本地
+- **Two ways to compose the pipeline**: the **Canvas** view is the original node editor (drag to connect);
+  the **List** view lays the stages out in execution order — tick which ones to include, use ↑↓ to
+  reorder (the main chain is rewired automatically), and reach *params / run / report* inline for each
+  stage. Use it if you would rather not drag anything.
+- **Preset templates**: one click switches between *Quick start / Full experiment / Accuracy first /
+  Edge speed / Custom*, ticking the right stages and ordering them for you.
+- **Per-stage reports**: every stage writes a Markdown report to `out/reports/<stage>.md` when it
+  finishes (key metrics, artifact sizes, logs and notes), plus a `run.md` run summary. Open the
+  drawer with the 📄 button in the header, or jump straight there from the *📄 report* button that
+  appears on each node card.
+- **Light/dark theme**: the ☀️/🌙 toggle in the header, remembered in `localStorage`.
+- **Node canvas**: six main stages — data prep → train → export GGUF → quantize → start inference
+  server → smoke test — connected in topological order.
+- **Optional stages** (dashed border + "optional" tag): train the target model / LoRA instruction
+  tuning / quantization scheme comparison / evaluation benchmark / speculative decoding experiment.
+  These are **excluded from "Run all" by default** so that one click never stalls on an extra
+  dependency; run them individually with "Run this node only".
+- **Free-form editing**: drag nodes to reposition them, drag from the right-hand dot onto the next
+  node's left-hand dot to reconnect; scroll to zoom, drag empty space to pan.
+- **Parameter panel**: click a node to edit its parameters (epochs, batch size, llama.cpp path,
+  quantization scheme, server port, test prompt, eval rounds, …) and to run just that node.
+- **Live logs**: after you press "▶ Run all", the backend executes nodes in topological order and
+  streams each node's stdout into its card over SSE.
+- **Run control**: hit "■ Stop" at any time (this also kills the llama-server child process).
+  Layout, edges and parameters are persisted in the browser.
 
-对应后端 API：`GET /api/workflow`（节点定义）、`POST /api/run`（SSE 执行日志）、`POST /api/cancel`、
-`GET /api/reports`（报告列表）、`GET /api/reports/content?name=<文件>`（报告原文）
+Corresponding backend API: `GET /api/workflow` (node definitions), `POST /api/run` (SSE execution
+logs), `POST /api/cancel`, `GET /api/reports` (report list), `GET /api/reports/content?name=<file>`
+(raw report text).
 
-### 一键启动脚本 (Windows)
+### One-click launcher scripts (Windows)
 
-| 脚本 | 作用 |
-|------|------|
-| `start.bat` | 双击启动网关并自动打开工作流界面（自动探测系统 Python、自动清理端口残留） |
-| `stop.bat`  | 一键停止网关与 llama-server |
+| Script | Purpose |
+|--------|---------|
+| `start.bat` | Double-click to start the gateway and open the workflow UI (auto-detects Python, clears stale ports) |
+| `stop.bat`  | Stops the gateway and llama-server in one go |
 
-`start.bat` 按 `PYTHON_CMD 环境变量 → 系统 PATH 中的 python` 顺序探测 Python。如果你的 Python 不在 PATH 里，先设置再运行：
+`start.bat` probes for Python in this order: the `PYTHON_CMD` environment variable, then `python` on
+`PATH`. If your Python is not on `PATH`, set it first:
 
 ```bat
 set PYTHON_CMD=D:\envs\llm\Scripts\python.exe
 start.bat
 ```
 
-> 只装 Python 不影响界面启动；训练/导出节点执行时才真正调用它。
+> Python is not needed to open the UI; it is only invoked when a train/export node actually runs.
 
-## 进阶阶段：量化精度 / 评测 / 投机解码 / 后训练
+## Advanced stages: quantization quality / evaluation / speculative decoding / post-training
 
-主流程跑通之后，这四个阶段用来回答端侧部署真正关心的问题：**压到多少、掉多少精度、跑多快、怎么再快一点**。
+Once the main pipeline works, these four stages answer what edge deployment really cares about:
+**how small can it get, how much accuracy does it lose, how fast does it run, and can it go faster.**
 
-先做一次环境自检（缺什么会直接告诉你）：
+Start with an environment self-check (it tells you exactly what is missing):
 
 ```bash
 make check
-# 或逐个: python pipeline/quantize_sweep.py --check / eval.py --check / spec_decode.py --check / sft.py --check
+# or individually: python pipeline/quantize_sweep.py --check / eval.py --check / spec_decode.py --check / sft.py --check
 ```
 
-### 1. 量化精度工程：imatrix 校准 + 多方案对比
+### 1. Quantization quality engineering: imatrix calibration + scheme comparison
 
-`llama-imatrix` 用校准语料统计每个权重张量对输出的重要度，`llama-quantize --imatrix` 再据此分配精度。
-同样是 4bit，带校准的方案困惑度明显更接近 F16 —— 这正是"低比特量化下保住精度"的常用手段。
+`llama-imatrix` uses a calibration corpus to score how much each weight tensor matters to the output,
+and `llama-quantize --imatrix` then allocates precision accordingly. At the same 4-bit width, a
+calibrated scheme lands noticeably closer to F16 in perplexity — the standard trick for keeping
+accuracy at low bit widths.
 
 ```bash
 make sweep
-# 等价于:
+# equivalent to:
 python pipeline/quantize_sweep.py --llama-cpp D:/tools/llama.cpp \
     --schemes Q8_0,Q4_K_M,Q4_K_S,IQ4_XS --imatrix auto --calibration data/corpus.txt
 ```
 
-产物：
+Artifacts:
 
-| 文件 | 内容 |
-|------|------|
-| `models/<模型>-<方案>.gguf` | 各方案的量化模型 |
-| `models/imatrix.dat` | 校准得到的重要性矩阵（可复用） |
-| `out/quantize_sweep.md` | 体积 / 压缩倍数 / 是否用校准 / 耗时 对比表 |
-| `out/quantize-<方案>.log` | 每个方案的完整量化日志 |
+| File | Contents |
+|------|----------|
+| `models/<model>-<scheme>.gguf` | The quantized model for each scheme |
+| `models/imatrix.dat` | The importance matrix from calibration (reusable) |
+| `out/quantize_sweep.md` | Size / compression ratio / calibrated-or-not / time comparison table |
+| `out/quantize-<scheme>.log` | Full quantization log per scheme |
 
-要点：`--imatrix none` 可关掉校准做对照；`--force` 重跑已存在的产物；imatrix 失败会自动降级为普通量化（加 `--imatrix-strict` 可改为直接报错）。
+Notes: `--imatrix none` turns calibration off for an A/B baseline; `--force` re-runs existing
+artifacts; if imatrix fails the script silently falls back to plain quantization (add
+`--imatrix-strict` to make it a hard error instead).
 
-### 2. 评测基准：PPL / 延迟 / 吞吐 / KV cache 量化
+### 2. Evaluation benchmark: PPL / latency / throughput / KV-cache quantization
 
-把"压缩到 1/4"变成一张可核对的表：
+Turn "shrunk to 1/4 the size" into a table you can check line by line:
 
 ```bash
 make eval
-# 等价于:
+# equivalent to:
 python pipeline/eval.py --llama-cpp D:/tools/llama.cpp --kv-quant --rounds 3
 ```
 
-| 指标 | 含义 | 来源 |
-|------|------|------|
-| PPL | 量化掉了多少精度 | `llama-perplexity -f data/eval.txt`（缺该工具时可用 `--hf-dir` 走 transformers 兜底） |
-| TTFT | 首 token 延迟（预填充耗时） | `llama-server` 返回的 `timings.prompt_ms` |
-| 预填充吞吐 | 长 prompt 的处理速度 | `timings.prompt_per_second` |
-| 解码吞吐 | 生成速度（端侧最关心） | `timings.predicted_per_second`，多轮取中位数 |
-| KV q8_0 解码 | 开启 KV cache 量化后的速度 | 以 `--cache-type-k/v q8_0` 再跑一组 |
-| 服务端 RSS | 常驻内存 | 有 `psutil` 时自动读取 |
+| Metric | Meaning | Source |
+|--------|---------|--------|
+| PPL | How much accuracy quantization cost | `llama-perplexity -f data/eval.txt` (falls back to transformers via `--hf-dir` if the tool is missing) |
+| TTFT | Time to first token (prefill) | `timings.prompt_ms` returned by `llama-server` |
+| Prefill throughput | Prompt processing speed | `timings.prompt_per_second` |
+| Decode throughput | Generation speed (what edge devices care about) | `timings.predicted_per_second`, median over rounds |
+| KV q8_0 decode | Speed with KV-cache quantization on | A second pass with `--cache-type-k/v q8_0` |
+| Server RSS | Resident memory | Read automatically when `psutil` is installed |
 
-产物：`out/benchmark.md`（含与 F16 基线的相对变化）与 `out/benchmark.json`（可画曲线）。
-用 `--models a.gguf b.gguf` 指定对比对象，默认扫 `models/` 下全部 GGUF。
+Artifacts: `out/benchmark.md` (including relative change versus the F16 baseline) and
+`out/benchmark.json` (ready for plotting). Use `--models a.gguf b.gguf` to pick the comparison set;
+by default it sweeps every GGUF under `models/`.
 
-### 3. 投机解码：draft + target 双模型
+### 3. Speculative decoding: draft + target, two models
 
-小模型快速猜测、大模型批量校验，猜中即省下大模型的自回归步数 —— 不牺牲精度的加速手段。
+A small model guesses ahead quickly and the large model verifies in batches — whenever a guess is
+right, an autoregressive step of the large model is saved. Speedup without sacrificing accuracy.
 
-前提是 **draft 与 target 必须共用同一分词器**，所以先训练一个更大一档的 target：
+The prerequisite is that **draft and target must share one tokenizer**, so train the larger target
+model first:
 
 ```bash
-# ① 训练 target（复用已有分词器，保证词表一致）
+# 1) train the target model (reusing the existing tokenizer guarantees an identical vocab)
 make train-target
-# ② 导出 + 量化（沿用同一套脚本）
+# 2) export + quantize (same scripts as before)
 python pipeline/write_gguf.py --hf-dir models/tinyllm-target-hf \
     --out models/tinyllm-target-f16.gguf --name tinyllm-target
 python pipeline/quantize_sweep.py --input models/tinyllm-target-f16.gguf --schemes Q4_K_M
-# ③ 跑对比实验
+# 3) run the comparison
 make spec
 ```
 
-产物 `out/spec_decode.md`：基线 vs 投机解码的解码吞吐、TTFT、加速比与 **接受率**（从 llama-server 的 `/metrics` 读取）。
-脚本会先校验两个模型的词表大小，不一致直接拦下（否则投机解码不会有效果）。
+Artifact `out/spec_decode.md`: decode throughput, TTFT, speedup and **acceptance rate** for baseline
+versus speculative decoding (read from llama-server's `/metrics`). The script checks the two models'
+vocab sizes first and stops if they differ (speculative decoding simply would not work).
 
-### 4. 后训练：LoRA 指令微调
+### 4. Post-training: LoRA instruction tuning
 
-预训练模型只会续写，指令微调让它学会"回答问题"。LoRA 只训练低秩适配器，参数量占比通常不足 1%：
+A pretrained model only continues text; instruction tuning teaches it to answer questions. LoRA
+trains only a low-rank adapter, usually well under 1% of the parameters:
 
 ```bash
 make sft
-# 快速验证链路（只跑 20 步）:
+# quick end-to-end check (20 steps only):
 python pipeline/sft.py --steps 20
-# 只出适配器不合并:
+# produce the adapter without merging:
 python pipeline/sft.py --no-merge
 ```
 
-数据格式（`data/sft_sample.jsonl`，一行一条）：
+Data format (`data/sft_sample.jsonl`, one record per line):
 
 ```json
-{"instruction": "什么是模型量化？", "input": "", "output": "模型量化是用更低的比特宽度表示权重……"}
+{"instruction": "What is model quantization?", "input": "", "output": "Model quantization represents weights with fewer bits ..."}
 ```
 
-产物：`models/tinyllm-hf-sft/`（合并后的 HF 模型，可直接导出量化）与 `out/lora-adapter/`（体积很小的适配器）。
-微调后的模型走同一条导出/量化/部署链路即可，例如：
+Artifacts: `models/tinyllm-hf-sft/` (the merged HF model, ready to export and quantize) and
+`out/lora-adapter/` (the much smaller adapter). A fine-tuned model goes through the exact same
+export/quantize/deploy path:
 
 ```bash
 python pipeline/write_gguf.py --hf-dir models/tinyllm-hf-sft --out models/tinyllm-sft-f16.gguf
 python pipeline/quantize_sweep.py --input models/tinyllm-sft-f16.gguf --schemes Q4_K_M
 ```
 
-### 推荐的实验顺序（把数字攒齐）
+### Recommended experiment order (to collect all the numbers)
 
 ```text
-make train → make export → make quantize        # 打底：能跑起来
-make sweep                                      # 体积/压缩倍数对比（imatrix vs 不校准）
-make eval                                       # 精度(PPL) - 延迟 - 吞吐 三维对比 + KV 量化
-make train-target → 导出量化 target → make spec   # 拿到投机解码加速比与接受率
-make sft → 导出量化 → 再 make eval                # 对比微调前后的困惑度与生成质量
+make train → make export → make quantize        # Baseline: get it running
+make sweep                                      # Size / compression ratio (imatrix vs none)
+make eval                                       # Accuracy (PPL) - latency - throughput, plus KV quantization
+make train-target → export+quantize target → make spec   # Speculative decoding speedup and acceptance rate
+make sft → export+quantize → make eval again     # Compare perplexity and output quality before/after tuning
 ```
 
-每一步的 Markdown 报告都在 `out/` 下，可以直接作为实验记录或写进技术总结。
+Every step leaves a Markdown report under `out/`, ready to use as an experiment log or to fold into
+a write-up.
 
-## 手动安装部署教程
+## Manual installation and deployment
 
-从零在一台新机器上跑通全流程（以 Windows 为例，Linux/macOS 同理，路径换成对应格式）。
+Getting the whole pipeline running on a fresh machine from zero (Windows as the example; Linux/macOS
+are the same with the respective path format).
 
-### 1. 安装 Python 环境并装依赖
+### 1. Set up Python and install dependencies
 
-要求 **Python 3.10+**（CPU 训练即可，无需 GPU）。
+**Python 3.10+** is required (CPU training is enough — no GPU needed).
 
 ```bash
-# 1) 建议创建独立虚拟环境
+# 1) create a dedicated virtual environment
 python -m venv D:\envs\llm_go
 D:\envs\llm_go\Scripts\activate          # Linux/macOS: source D:/envs/llm_go/bin/activate
 
-# 2) 安装依赖 (CPU 版 torch 体积小、足够本项目使用)
+# 2) install dependencies (the CPU-only torch wheel is small and sufficient here)
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 ```
 
-> Windows 如果 `python` 不在 PATH，后续所有 `python` 命令都要换成完整路径，
-> 或者用 `set PYTHON_CMD=D:\envs\llm_go\Scripts\python.exe` 让工作流引擎使用它。
+> On Windows, if `python` is not on `PATH`, substitute the full path for every `python` command
+> below, or set `set PYTHON_CMD=D:\envs\llm_go\Scripts\python.exe` so the workflow engine uses it.
 
-### 2. 安装 Go (1.22+)
+### 2. Install Go (1.22+)
 
-从 https://go.dev/dl/ 下载安装，确认 `go version` ≥ 1.22。然后编译网关：
+Download and install from https://go.dev/dl/, verify `go version` ≥ 1.22, then build the gateway:
 
 ```bash
 cd server
@@ -249,93 +280,122 @@ go mod tidy
 go build -o llm-gateway.exe .    # Linux/macOS: go build -o llm-gateway .
 ```
 
-### 3. 获取 llama.cpp 运行时
+### 3. Get the llama.cpp runtime
 
-本项目**只需要两个二进制**：`llama-server`（推理服务）和 `llama-quantize`（量化器）。
-导出环节用的是项目自带的 `pipeline/write_gguf.py`，不需要 clone llama.cpp 源码。
+This project needs only **two binaries**: `llama-server` (inference) and `llama-quantize`
+(quantizer). Export is handled by the bundled `pipeline/write_gguf.py`, so you do not need to clone
+the llama.cpp source tree.
 
-- 去 https://github.com/ggml-org/llama.cpp/releases 下载对应平台的包（如 `llama-bXXXX-bin-win-cpu-x64.zip`）
-- 解压到任意目录，例如 `D:\tools\llama.cpp\bin\`（Linux/macOS 也可以自己编译：`cmake -B build && cmake --build build`）
+- Grab the archive for your platform from https://github.com/ggml-org/llama.cpp/releases
+  (e.g. `llama-bXXXX-bin-win-cpu-x64.zip`)
+- Unzip it anywhere, for example `D:\tools\llama.cpp\bin\` (on Linux/macOS you can also build it
+  yourself: `cmake -B build && cmake --build build`)
 
 ```bash
-# 验证两个二进制可用
+# verify both binaries work
 D:/tools/llama.cpp/bin/llama-server.exe --version
 D:/tools/llama.cpp/bin/llama-quantize.exe --version
 ```
 
-### 4. 跑通流水线（命令行方式）
+### 4. Run the pipeline (command line)
 
 ```bash
-# ① 数据准备 + 训练
+# 1) data prep + training
 python pipeline/train.py --epochs 150
 
-# ② 导出 GGUF (F16) + 量化 (Q4_K_M)
+# 2) export GGUF (F16) + quantize (Q4_K_M)
 python pipeline/export_gguf.py --llama-cpp D:/tools/llama.cpp
-# 产物: models/tinyllm-f16.gguf -> models/tinyllm-q4_k_m.gguf
-# 注: 导出用项目自带 write_gguf.py 而非官方 convert_hf_to_gguf.py,
-#     因为后者用哈希白名单识别分词器, 从零自训的词表无法通过识别
+# artifacts: models/tinyllm-f16.gguf -> models/tinyllm-q4_k_m.gguf
+# note: export uses the bundled write_gguf.py rather than the official convert_hf_to_gguf.py,
+#       because the official one identifies tokenizers through a hash whitelist that a
+#       from-scratch vocab can never match
 
-# ③ 启动推理服务 (终端 1)
+# 3) start the inference server (terminal 1)
 D:/tools/llama.cpp/bin/llama-server.exe -m models/tinyllm-q4_k_m.gguf --host 127.0.0.1 --port 8081 --ctx-size 512
 
-# ④ 启动 Go 网关 (终端 2)
+# 4) start the Go gateway (terminal 2)
 cd server && ./llm-gateway.exe
 ```
 
-验证：
+Verify:
 
 ```bash
 curl http://localhost:8080/healthz
 
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"人工智能是什么"}],"max_tokens":64}'
+  -d '{"messages":[{"role":"user","content":"What is AI?"}],"max_tokens":64}'
 
-# 流式输出 (SSE)
+# streaming (SSE)
 curl -N http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"深度学习"}],"stream":true}'
+  -d '{"messages":[{"role":"user","content":"Deep learning"}],"stream":true}'
 ```
 
-### 5. 跑通流水线（可视化界面方式）
+### 5. Run the pipeline (visual UI)
 
-启动网关后打开 http://localhost:8080/web/ ，点「▶ 运行全部」即可。
-使用前在界面上检查两处参数：
+Start the gateway and open http://localhost:8080/web/, then hit "▶ Run all". Before running, check
+two parameters in the UI:
 
-- **导出 GGUF 节点** → `llamacpp_dir`：填第 3 步的 llama.cpp 目录（如 `D:/tools/llama.cpp`）
-- **模型训练节点** → 训练轮数等参数按需调整（默认 150）
+- **Export GGUF node** → `llamacpp_dir`: the llama.cpp directory from step 3 (e.g. `D:/tools/llama.cpp`)
+- **Model training node** → epochs and friends, as needed (150 by default)
 
-网关的环境变量（可选）：
+Optional gateway environment variables:
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `PYTHON_CMD` | `python` | 工作流节点调用的 Python 解释器（**建议指向你的虚拟环境**） |
-| `LLAMA_CPP_DIR` | — | llama.cpp 目录默认值（也可在界面参数里填） |
-| `GATEWAY_PORT` | `8080` | 网关监听端口 |
-| `LLAMA_SERVER_URL` | `http://127.0.0.1:8081` | 上游 llama-server 地址 |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PYTHON_CMD` | `python` | Interpreter used by workflow nodes (**point it at your venv**) |
+| `LLAMA_CPP_DIR` | — | Default llama.cpp directory (can also be set in the UI) |
+| `GATEWAY_PORT` | `8080` | Gateway port |
+| `LLAMA_SERVER_URL` | `http://127.0.0.1:8081` | Upstream llama-server address |
 
-其他网关参数: `DEFAULT_MAX_TOKENS`、`DEFAULT_TEMP`
+Other gateway parameters: `DEFAULT_MAX_TOKENS`, `DEFAULT_TEMP`
 
-### 6. Docker 部署 (可选)
+### 6. Docker deployment (optional)
 
 ```bash
-docker compose up -d          # 启动 llama-server + gateway
-docker compose run pipeline   # 一键训练+导出 (需挂载 llama.cpp 仓库, 见 compose 注释)
+docker compose up -d          # start llama-server + gateway
+docker compose run pipeline   # one-shot train + export (needs the llama.cpp repo mounted; see compose comments)
 ```
 
-## 换成自己的模型/数据
+## Swapping in your own model or data
 
-- **换语料**: 替换 `data/corpus.txt`，语料越多模型越"像话"（建议至少几百 KB 纯文本）
-- **调模型**: 改 `pipeline/config.yaml` 的 `model` 段（层数/维度），注意 CPU 训练时间会随之增长
-- **换量化方案**: 改 `config.yaml` 的 `quantize.type`（Q8_0 更准、Q4_K_S 更小）
-- **常见坑**:
-  - **网关用哪个 Python**: 工作流节点由网关以 `PYTHON_CMD`（或 PATH 里的 `python`）启动子进程。PATH 里的 `python` 常常是没装依赖的精简解释器，会让每个节点以 `ModuleNotFoundError: No module named 'yaml'` 失败、后续节点全部跳过。网关现在会按 `PYTHON_CMD → VIRTUAL_ENV → 项目 .venv/venv/env → PATH` 顺序**实测 `import yaml`** 挑出一个能用的解释器并在启动日志里打印；`start.bat` 同样会探测。仍建议显式指定：`set PYTHON_CMD=D:\envs\llm_go\Scripts\python.exe`
-  - **导出/量化不需要 llama.cpp 源码仓库**: `export_gguf.py --llama-cpp <目录>` 里的目录只需包含 `bin/llama-quantize`（release 解压即可），转换这一步由项目自带的 `write_gguf.py` 完成
-  - Trainer 需要 `accelerate`（已写入 requirements.txt）
-  - llama-quantize 在输出重定向到管道时可能报 iostream 错误并返回非零，但产物已生成——`export_gguf.py` 已按产物判断成败
-  - 新版 llama-server 对非流式 `/completion` 输出做严格 UTF-8 校验，小模型偶发的坏字节会 500；流式请求不受影响（工作流测试节点已用流式）
-  - **`--chunks 0` 陷阱**: 部分 llama.cpp 版本会把它当真、只跑 0 个 chunk——`llama-perplexity` 直接报错、`llama-imatrix` 产出 448 字节空矩阵。`eval.py` / `quantize_sweep.py` 已不再传该参数
-  - **投机解码参数改名**: 新版 llama.cpp 已移除 `--draft-max/--draft-min/--draft-p-min`，改为 `--spec-draft-n-max/--spec-draft-n-min/--spec-draft-p-min`。`spec_decode.py` 用 `--help` 探测自动兼容两代
-  - **投机解码指标改名**: 新版 `/metrics` 计数器为 `llamacpp:spec_decode_num_accepted_tokens_total` / `_num_draft_tokens_total`（旧版为 `draft_n_accepted_total` / `draft_n_evaluated_total`），两套均已适配
-  - **语料长度要求**: PPL / imatrix 语料 token 数需 ≥ 2×上下文长度，否则报错。脚本会在语料不足时自动下调上下文重试；若替换 `data/eval.txt`，请保证它足够长（建议 ≥ 4KB 文本）
-- **上 LoRA 微调**: 把 train.py 换成 peft 的 LoRA 训练 HF 现成模型（如 Qwen3-0.6B），后续导出/量化/部署流程完全复用
+- **Different corpus**: replace `data/corpus.txt`. The more text, the more coherent the model
+  (a few hundred KB of plain text is the practical minimum).
+- **Different model shape**: edit the `model` section of `pipeline/config.yaml` (layers / width).
+  Remember CPU training time grows with it.
+- **Different quantization scheme**: change `quantize.type` in `config.yaml` (Q8_0 is more accurate,
+  Q4_K_S is smaller).
+- **Common pitfalls**:
+  - **Which Python does the gateway use**: workflow nodes run as child processes started by the
+    gateway with `PYTHON_CMD` (or `python` on `PATH`). That `python` is often a stripped-down
+    interpreter without the dependencies, which makes every node fail with
+    `ModuleNotFoundError: No module named 'yaml'` and skips all downstream nodes. The gateway now
+    probes `PYTHON_CMD → VIRTUAL_ENV → project .venv/venv/env → PATH` and actually tests
+    `import yaml`, picking a working interpreter and logging it at startup; `start.bat` probes the
+    same way. Still, setting it explicitly is best:
+    `set PYTHON_CMD=D:\envs\llm_go\Scripts\python.exe`
+  - **Export/quantize do not need the llama.cpp source repo**: the directory passed to
+    `export_gguf.py --llama-cpp <dir>` only has to contain `bin/llama-quantize` (the release zip is
+    enough); the conversion step is done by the bundled `write_gguf.py`
+  - The Trainer needs `accelerate` (already in requirements.txt)
+  - `llama-quantize` may report an iostream error and return non-zero when its output is piped, even
+    though the artifact was produced — `export_gguf.py` judges success by the output file
+  - Recent `llama-server` builds validate non-streaming `/completion` output strictly as UTF-8; a
+    rare bad byte from a tiny model causes an HTTP 500. Streaming requests are unaffected (the
+    workflow's test node already uses streaming)
+  - **The `--chunks 0` trap**: some llama.cpp versions take it literally and run zero chunks —
+    `llama-perplexity` errors out and `llama-imatrix` writes an empty 448-byte matrix. `eval.py` and
+    `quantize_sweep.py` no longer pass it.
+  - **Speculative decoding flags were renamed**: recent llama.cpp removed
+    `--draft-max/--draft-min/--draft-p-min` in favor of
+    `--spec-draft-n-max/--spec-draft-n-min/--spec-draft-p-min`. `spec_decode.py` probes `--help` and
+    supports both generations.
+  - **Speculative decoding metrics were renamed**: recent `/metrics` counters are
+    `llamacpp:spec_decode_num_accepted_tokens_total` / `_num_draft_tokens_total` (older builds used
+    `draft_n_accepted_total` / `draft_n_evaluated_total`); both are handled.
+  - **Corpus length requirements**: PPL / imatrix need at least 2× the context length in tokens or
+    they error out. The scripts automatically lower the context and retry when the corpus is short;
+    if you replace `data/eval.txt`, keep it reasonably long (≥ 4 KB of text).
+- **Going further with LoRA**: swap `train.py` for peft-based LoRA training of an off-the-shelf HF
+  model (e.g. Qwen3-0.6B). The export/quantize/deploy pipeline is reused unchanged.

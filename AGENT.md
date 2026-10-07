@@ -7,7 +7,7 @@ This file records conventions that are **not obvious from the code**. Follow the
 ## 1. Commit messages MUST be in English
 
 This is the one hard rule. All commits in this repository are written in **English**,
-even though code comments, log strings and `README.md` are Chinese.
+even though code comments, log strings and `README.zh-CN.md` are Chinese.
 
 Format: [Conventional Commits](https://www.conventionalcommits.org/), imperative mood,
 subject ≤ 72 chars, no trailing period. Body (optional) is a bullet list in English.
@@ -33,8 +33,8 @@ Language split by artifact:
 | Commit subject / body | **English** (mandatory) |
 | Code comments | Chinese (match surrounding code) |
 | Runtime log lines / CLI help | Chinese |
-| `README.md` | Chinese |
-| `README.en.md` | English |
+| `README.md` | English (default, rendered by GitHub) |
+| `README.zh-CN.md` | 简体中文 |
 | `AGENT.md`, `LICENSE` | English |
 
 ### Bilingual README rule
@@ -43,14 +43,14 @@ The README exists in two files that must stay in sync:
 
 | File | Language | Role |
 |---|---|---|
-| `README.md` | 简体中文 | Default (rendered by GitHub) |
-| `README.en.md` | English | Translation |
+| `README.md` | English | Default (rendered by GitHub) |
+| `README.zh-CN.md` | 简体中文 | Translation |
 
 Both files start with a one-line language switcher linking to the other:
 
 ```markdown
-> 🌐 [English](README.en.md) | **简体中文**      <!-- top of README.md -->
-> 🌐 **English** | [简体中文](README.md)        <!-- top of README.en.md -->
+> 🌐 **English** | [简体中文](README.zh-CN.md)   <!-- top of README.md -->
+> 🌐 [English](README.md) | **简体中文**          <!-- top of README.zh-CN.md -->
 ```
 
 **Any change to one README must be mirrored in the other in the same commit.**

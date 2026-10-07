@@ -179,7 +179,7 @@ def main():
     for label, path in (("draft", draft), ("target", target)):
         if not path.exists():
             sys.exit(f"[spec] {label} 模型不存在: {path}\n"
-                     f"        请按 README「投机解码」一节训练并量化两个共用词表的模型")
+                     f"        请按 README.zh-CN.md「投机解码」一节训练并量化两个共用词表的模型")
 
     # 词表一致性校验: 不一致时投机解码不会有任何收益
     vm_d, vm_t = gguf_meta(draft), gguf_meta(target)
